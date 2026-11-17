@@ -28,6 +28,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     private var started = false
     private var paused = false
     private var gamepadRequestInFlight = false
+    private var deviceConnectInFlight = false
     private var gamepadRetryTask: Task<Void, Never>?
     private var gamepadRetryCount = 0
     private var restartTask: Task<Void, Never>?
@@ -324,10 +325,24 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
     private func reconnectGamepadIfNeeded() {
         guard connectedDevice != nil, session == nil, !needsPin else { return }
-        if !gamepadRequestInFlight {
-            gamepadRetryCount = 0
-            requestGamepadSession()
-        }
+        connectAuthorizedDevice()
+    }
+
+    /// Повторно регистрируем устройство с токеном, полученным после PIN.
+    /// Запрашивать gamepad session можно только после подтверждения этого подключения.
+    private func connectAuthorizedDevice() {
+        guard let id = activeDeviceID,
+              connectedDevice != nil,
+              !needsPin,
+              !deviceConnectInFlight else { return }
+        gamepadRetryTask?.cancel()
+        gamepadRetryTask = nil
+        gamepadRequestInFlight = false
+        deviceConnectInFlight = true
+        status = "Завершаем подключение к телевизору…"
+        let token = cast.accessTokenForDevice(id)
+        let requestID = cast.connectToDevice(deviceId: id, accessToken: token)
+        DebugLog.add("ЗАПРОС → повторный connectToDevice после авторизации, request id: \(String(describing: requestID)); токен скрыт")
     }
 
     func forgetSavedDevice() {
@@ -402,11 +417,15 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     func onError(error: LibSberCast.CastError) {
         DebugLog.error("SberCast callback: \(error.msg)")
         if error.msg.contains("-72000") {
-            // При уже полученной сессии discovery не перезапускаем: рабочий канал не трогаем.
-            if connectedDevice != nil && session != nil { return }
+            // Перезапуск SberCast после выбора ТВ сбрасывает регистрацию устройства.
+            if connectedDevice != nil {
+                DebugLog.add("Bonjour -72000: сохраняем экземпляр SberCast, discovery не перезапускаем")
+                return
+            }
             scheduleDiscoveryRestart()
             return
         }
+        deviceConnectInFlight = false
         self.error = error.msg
         self.gamepadRequestInFlight = false
         self.status = hasSavedDevice ? "Ошибка подключения — телевизор сохранён" : "Ошибка подключения"
@@ -436,7 +455,14 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func onCastRequestResponse(response: LibSberCast.CastRequestResponse) {
-        DebugLog.add("ОТВЕТ SDK ← CastRequestResponse: code=\(response.code), type=\(response.type)")
+        switch response.type {
+        case .pinConnectConfirmationCastResponse(let deviceId, let pinStatus, _):
+            DebugLog.add("ОТВЕТ SDK ← CastRequestResponse: code=\(response.code), type=pinConnectConfirmation(deviceId: \(deviceId), status: \(pinStatus), pinAccessToken: <скрыт>)")
+        case .gamepadSessionConnectionInfoCastResponse(let deviceId, let status, let sessionId, let port, let serviceVersion, _, let ipV4List):
+            DebugLog.add("ОТВЕТ SDK ← CastRequestResponse: code=\(response.code), type=gamepadSession(deviceId: \(deviceId), status: \(status), sessionId: \(sessionId), port: \(port), version: \(serviceVersion), aesKey: <скрыт>, ip: \(ipV4List))")
+        default:
+            DebugLog.add("ОТВЕТ SDK ← CastRequestResponse: code=\(response.code), type=\(response.type)")
+        }
         // PIN-ответ обрабатываем до общей проверки response.code:
         // SDK может вернуть конкретную причину отказа в status, даже если
         // верхнеуровневый код запроса не равен .success.
@@ -458,7 +484,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                 pin = ""
                 error = nil
                 gamepadRetryCount = 0
-                requestGamepadSession()
+                connectAuthorizedDevice()
             case .wrongPin:
                 DebugLog.error("Телевизор вернул wrongPin")
                 error = "Телевизор вернул wrongPin. Проверьте, что код не обновился на экране ТВ."
@@ -485,6 +511,19 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
         guard response.code == .success else {
             gamepadRequestInFlight = false
+            if !deviceConnectInFlight,
+               connectedDevice != nil,
+               (response.code == .deviceNotConnected || response.code == .unknownDevice) {
+                session = nil
+                DebugLog.error("SDK потерял подключение к ТВ (\(response.code)); повторно регистрируем устройство с сохранённым токеном")
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run { self?.connectAuthorizedDevice() }
+                }
+                return
+            }
+            deviceConnectInFlight = false
             DebugLog.error("Cast request rejected: \(response.code)")
             error = "Запрос к телевизору отклонён (\(response.code))"
             status = connectedDevice == nil ? "Телевизор сохранён, но недоступен" : "Ошибка подключения"
@@ -494,6 +533,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         switch response.type {
         case .pinConnectCastResponse(let deviceId, let status):
             activeDeviceID = deviceId
+            deviceConnectInFlight = false
             switch status {
             case .inputPinCode:
                 needsPin = true
