@@ -321,9 +321,14 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func confirmPIN() {
-        guard let id = activeDeviceID, !pin.isEmpty else { return }
+        guard let id = activeDeviceID else { return }
+        let code = pin.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return }
+        pin = code
+        error = nil
         status = "Проверяем код…"
-        _ = cast.confirmDeviceConnectionCode(deviceId: id, code: pin)
+        DebugLog.add("Отправка PIN: \(code.count) символов")
+        _ = cast.confirmDeviceConnectionCode(deviceId: id, code: code)
     }
 
     private func requestGamepadSession() {
@@ -395,6 +400,46 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func onCastRequestResponse(response: LibSberCast.CastRequestResponse) {
+        // PIN-ответ обрабатываем до общей проверки response.code:
+        // SDK может вернуть конкретную причину отказа в status, даже если
+        // верхнеуровневый код запроса не равен .success.
+        if case .pinConnectConfirmationCastResponse(let deviceId, let pinStatus, let token) = response.type {
+            activeDeviceID = deviceId
+            DebugLog.add("PIN response: request=\(response.code), status=\(pinStatus)")
+
+            guard response.code == .success else {
+                error = "ТВ отклонил подтверждение: \(pinStatus) (\(response.code))"
+                status = "Не удалось подтвердить подключение"
+                return
+            }
+
+            switch pinStatus {
+            case .authorized:
+                cast.setAccessTokenForDevice(deviceId, accessToken: token)
+                needsPin = false
+                pin = ""
+                error = nil
+                gamepadRetryCount = 0
+                requestGamepadSession()
+            case .wrongPin:
+                error = "Телевизор вернул wrongPin. Проверьте, что код не обновился на экране ТВ."
+                status = "Телевизор отклонил код"
+            case .attemptsLimitReached:
+                error = "Телевизор ограничил попытки ввода кода. Запросите новый код на ТВ."
+                status = "Лимит попыток исчерпан"
+            case .badSessionIdentifiers:
+                error = "Сеанс сопряжения устарел. Начните подключение заново."
+                status = "Сеанс сопряжения истёк"
+            case .disabled:
+                error = "Подключение по PIN отключено на телевизоре."
+                status = "Сопряжение отключено"
+            case .error:
+                error = "Телевизор вернул ошибку подтверждения PIN."
+                status = "Ошибка сопряжения"
+            }
+            return
+        }
+
         guard response.code == .success else {
             gamepadRequestInFlight = false
             error = "Запрос к телевизору отклонён (\(response.code))"
@@ -417,21 +462,6 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                 requestGamepadSession()
             default:
                 error = "Телевизор отклонил подключение"
-                self.status = "Ошибка подключения"
-            }
-
-        case .pinConnectConfirmationCastResponse(let deviceId, let status, let token):
-            activeDeviceID = deviceId
-            switch status {
-            case .authorized:
-                cast.setAccessTokenForDevice(deviceId, accessToken: token)
-                needsPin = false
-                pin = ""
-                error = nil
-                gamepadRetryCount = 0
-                requestGamepadSession()
-            default:
-                error = "Неверный код или подключение запрещено"
                 self.status = "Ошибка подключения"
             }
 
