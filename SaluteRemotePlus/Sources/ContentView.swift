@@ -11,6 +11,12 @@ struct ContentView: View {
             if remote.connectedDevice != nil { RemotePadView(remote: remote) } else { ConnectionView(remote: remote) }
         }
         .preferredColorScheme(.dark)
+        .sheet(isPresented: Binding(
+            get: { remote.needsPin },
+            set: { if !$0 && remote.needsPin { remote.cancelPin() } }
+        )) {
+            PinSheet(remote: remote)
+        }
         .onAppear { remote.resume() }
         .onChange(of: scenePhase) { phase in
             switch phase {
@@ -79,6 +85,18 @@ struct StatusCard: View {
 struct RemotePadView: View {
     @ObservedObject var remote: SberCastRemote
     @State private var showKeyboard = false
+    @State private var showDiagnostics = false
+
+    private var channelColor: Color {
+        if remote.session != nil && remote.wireReady { return .green }
+        return remote.error == nil ? .orange : .red
+    }
+
+    private var channelText: String {
+        if remote.session == nil { return "Запрашиваем канал пульта…" }
+        return remote.wireReady ? "Пульт готов" : "Открываем канал…"
+    }
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView(showsIndicators: false) {
@@ -86,9 +104,20 @@ struct RemotePadView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(remote.connectedDevice?.name ?? "Телевизор").font(.system(size: 23, weight: .bold, design: .rounded))
-                            HStack(spacing: 6) { Circle().fill(.green).frame(width: 7, height: 7); Text("Подключено").font(.caption.weight(.medium)).foregroundStyle(.green) }
+                            HStack(spacing: 6) {
+                                Circle().fill(channelColor).frame(width: 7, height: 7)
+                                Text(channelText).font(.caption.weight(.medium)).foregroundStyle(channelColor)
+                            }
                         }
                         Spacer()
+                        Button { Haptics.tap(); showDiagnostics = true } label: {
+                            Image(systemName: "stethoscope").font(.title3).frame(width: 46, height: 46).background(.white.opacity(0.08), in: Circle())
+                        }
+                        if remote.session == nil {
+                            Button { Haptics.tap(); remote.reconnectChannel() } label: {
+                                Image(systemName: "arrow.clockwise").font(.title3).frame(width: 46, height: 46).background(.white.opacity(0.08), in: Circle())
+                            }
+                        }
                         Button { remote.forgetSavedDevice(); Haptics.tap() } label: { Image(systemName: "link.badge.plus").font(.title3).frame(width: 46, height: 46).background(.white.opacity(0.08), in: Circle()) }
                     }
                     RemoteTopBar(send: send)
@@ -109,6 +138,7 @@ struct RemotePadView: View {
             }
         }
         .sheet(isPresented: $showKeyboard) { TextInputSheet(remote: remote) }
+        .sheet(isPresented: $showDiagnostics) { DiagnosticsSheet(remote: remote, wire: remote.wire) }
     }
     private func send(_ command: RemoteCommand) { Haptics.tap(); remote.send(command) }
 }
@@ -157,3 +187,33 @@ struct TextInputSheet: View {
 }
 
 enum Haptics { static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
+
+
+struct PinSheet: View {
+    @ObservedObject var remote: SberCastRemote
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "lock.shield").font(.system(size: 40)).padding(.top, 28)
+            Text("Код с экрана ТВ").font(.title2.bold())
+            Text("Введите код, который показан на телевизоре \\(remote.connectedDevice?.name ?? "")")
+                .font(.subheadline).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
+            TextField("0000", text: $remote.pin)
+                .keyboardType(.numberPad).multilineTextAlignment(.center).focused($focused)
+                .font(.system(size: 34, weight: .bold, design: .monospaced))
+                .padding().background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+            if let error = remote.error { Text(error).font(.caption).foregroundStyle(.red) }
+            Button { remote.confirmPIN(); Haptics.tap() } label: {
+                Text("Подключить").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 15)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(remote.pin.isEmpty)
+            Button("Отмена") { remote.cancelPin() }.foregroundStyle(.white.opacity(0.6))
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .preferredColorScheme(.dark)
+        .onAppear { focused = true }
+    }
+}
