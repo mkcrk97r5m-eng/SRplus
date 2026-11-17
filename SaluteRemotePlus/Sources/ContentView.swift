@@ -197,7 +197,7 @@ struct PinSheet: View {
         VStack(spacing: 18) {
             Image(systemName: "lock.shield").font(.system(size: 40)).padding(.top, 28)
             Text("Код с экрана ТВ").font(.title2.bold())
-            Text("Введите код, который показан на телевизоре \\(remote.connectedDevice?.name ?? "")")
+            Text("Введите код, который показан на телевизоре \(remote.connectedDevice?.name ?? "")")
                 .font(.subheadline).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
             TextField("0000", text: $remote.pin)
                 .keyboardType(.numberPad).multilineTextAlignment(.center).focused($focused)
