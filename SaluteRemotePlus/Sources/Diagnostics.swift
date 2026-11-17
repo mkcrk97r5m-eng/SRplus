@@ -69,6 +69,7 @@ struct DiagnosticsSheet: View {
     @ObservedObject var wire: GamepadWire
     @ObservedObject private var log = DebugLog.shared
     @StateObject private var probe = WireProbe()
+    @State private var showSuccessAlert = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -93,7 +94,7 @@ struct DiagnosticsSheet: View {
                                 .font(.footnote)
                                 .foregroundStyle(.orange)
                             HStack {
-                                Button("✅ Работает") { probe.finish(keep: true, wire: wire) }
+                                Button("✅ Работает") { probe.finish(keep: true, wire: wire); showSuccessAlert = true }
                                     .buttonStyle(.borderedProminent)
                                 Button("Остановить") { probe.finish(keep: false, wire: wire) }
                                     .buttonStyle(.bordered)
@@ -123,6 +124,7 @@ struct DiagnosticsSheet: View {
                             .font(.footnote)
 
                             manualPickers
+                            manualButtonTests
                         }
                     } else {
                         Button("Запросить канал заново") { remote.reconnectChannel() }
@@ -159,6 +161,40 @@ struct DiagnosticsSheet: View {
             }
         }
         .preferredColorScheme(.dark)
+        .alert("Найден рабочий вариант", isPresented: $showSuccessAlert) {
+            Button("Отлично", role: .cancel) { }
+        } message: {
+            Text("Комбинация сохранена и будет использоваться основным пультом: \(probe.current?.title ?? wire.config.title)")
+        }
+    }
+
+    private var manualButtonTests: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Проверка отдельных кнопок").font(.footnote).foregroundStyle(.white.opacity(0.5))
+            Text("Команды отправляются через текущую конфигурацию канала. Проверяй реакцию телевизора после каждого нажатия.")
+                .font(.caption2).foregroundStyle(.white.opacity(0.45))
+            HStack {
+                testButton("↑", code: 19)
+                testButton("←", code: 21)
+                testButton("OK", code: 23)
+                testButton("→", code: 22)
+                testButton("↓", code: 20)
+            }
+            HStack {
+                testButton("Назад", code: 4)
+                testButton("Домой", code: 3)
+                testButton("Громче", code: 24)
+                testButton("Тише", code: 25)
+            }
+        }
+        .padding(12)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func testButton(_ title: String, code: Int32) -> some View {
+        Button(title) { wire.press(code) }
+            .buttonStyle(.bordered)
+            .font(.caption)
     }
 
     private var manualPickers: some View {
