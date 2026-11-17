@@ -16,6 +16,10 @@ final class DebugLog: ObservableObject {
         DispatchQueue.main.async { shared.append(text) }
     }
 
+    static func error(_ text: String) {
+        add("❌ ОШИБКА: \(text)")
+    }
+
     private func append(_ text: String) {
         lines.append("\(formatter.string(from: Date())) \(text)")
         if lines.count > 150 { lines.removeFirst(lines.count - 150) }
