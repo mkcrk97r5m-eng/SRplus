@@ -34,16 +34,33 @@ jobs:
 
           test -d "$APP"
           test -f "$PLIST"
-          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST" >/dev/null
-          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$PLIST" >/dev/null
 
-          if ! /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$PLIST" | grep -Fqx "_staros._tcp"; then
-            /usr/libexec/PlistBuddy -c "Add :NSBonjourServices: string _staros._tcp" "$PLIST"
-          fi
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
 
-          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$PLIST" | grep -Fqx "_staros._tcp"
-          echo "Patched bundle: $APP"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
+          path = Path("Payload/LiveContainer.app/Info.plist")
+          with path.open("rb") as stream:
+              info = plistlib.load(stream)
+
+          services = info.get("NSBonjourServices")
+          if not isinstance(services, list):
+              raise SystemExit("NSBonjourServices is missing or is not an array")
+          if not info.get("NSLocalNetworkUsageDescription"):
+              raise SystemExit("NSLocalNetworkUsageDescription is missing")
+
+          if "_staros._tcp" not in services:
+              services.append("_staros._tcp")
+
+          with path.open("wb") as stream:
+              plistlib.dump(info, stream, fmt=plistlib.FMT_XML, sort_keys=False)
+
+          with path.open("rb") as stream:
+              verified = plistlib.load(stream)
+          assert "_staros._tcp" in verified["NSBonjourServices"]
+          print("Verified NSBonjourServices:", verified["NSBonjourServices"])
+          print("LiveContainer version:", verified.get("CFBundleShortVersionString", "unknown"))
+          PY
 
           # SideStore must re-sign the modified app with the user's own certificate.
           find Payload -type d -name "_CodeSignature" -prune -exec rm -rf {} +
@@ -55,7 +72,13 @@ jobs:
 
           # Verify the final archive contains the patched host Info.plist.
           unzip -p LiveContainer-StarOS.ipa Payload/LiveContainer.app/Info.plist > /tmp/LiveContainer-Info.plist
-          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" /tmp/LiveContainer-Info.plist | grep -Fqx "_staros._tcp"
+          python3 - <<'PY'
+          import plistlib
+          with open("/tmp/LiveContainer-Info.plist", "rb") as stream:
+              info = plistlib.load(stream)
+          assert "_staros._tcp" in info["NSBonjourServices"]
+          print("Final IPA verified: _staros._tcp is present")
+          PY
           unzip -Z1 LiveContainer-StarOS.ipa | grep -Fx "Payload/LiveContainer.app/Info.plist"
 
           {
