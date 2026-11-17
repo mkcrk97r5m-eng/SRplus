@@ -228,6 +228,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         )
         permissionBrowser = browser
         browser.stateUpdateHandler = { [weak self] state in
+            DebugLog.add("Bonjour browser state: \(state)")
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 switch state {
@@ -238,6 +239,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                     self.status = self.hasSavedDevice ? "Ищем сохранённый телевизор…" : "Ищем телевизор…"
                     self.cast.start()
                 case .failed(let error):
+                    DebugLog.error("Bonjour browser: \(error.localizedDescription), code=\(error.errorCode)")
                     self.permissionBrowser?.cancel()
                     self.permissionBrowser = nil
                     guard !self.paused else { return }
@@ -551,6 +553,10 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         }
     }
 
-    func onBLEDeeplinkReceived(deeplink: String) {}
-    func onBLEDeeplinkRunInfo(_ info: LibSberCast.RunBLEDeeplinkOnDeviceInfo) {}
+    func onBLEDeeplinkReceived(deeplink: String) {
+        DebugLog.add("ОТВЕТ SDK ← BLE deeplink получен (содержимое скрыто)")
+    }
+    func onBLEDeeplinkRunInfo(_ info: LibSberCast.RunBLEDeeplinkOnDeviceInfo) {
+        DebugLog.add("ОТВЕТ SDK ← BLE deeplink run info: \(info)")
+    }
 }
