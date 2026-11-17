@@ -48,6 +48,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
     // MARK: - Кнопки, текст, голос
     func send(_ command: RemoteCommand) {
+        DebugLog.add("ДЕЙСТВИЕ: кнопка \(command) (код \(command.keyCode))")
         guard session != nil else {
             notice = "Канал пульта ещё не готов — переподключаем…"
             if !gamepadRequestInFlight { reconnectChannel() }
@@ -57,11 +58,15 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         wire.press(Int32(command.keyCode))
     }
 
-    func sendKey(_ code: Int32) { wire.press(code) }
+    func sendKey(_ code: Int32) {
+        DebugLog.add("ДЕЙСТВИЕ: клавиша \(code)")
+        wire.press(code)
+    }
 
     /// Повторно запросить у ТВ параметры игрового канала.
     func reconnectChannel() {
-        guard connectedDevice != nil, !needsPin else { return }
+        DebugLog.add("ДЕЙСТВИЕ: повторный запрос канала пульта")
+        guard connectedDevice != nil, !needsPin else { DebugLog.add("Пропуск: ТВ не подключён или ожидается PIN"); return }
         gamepadRetryTask?.cancel()
         gamepadRequestInFlight = false
         gamepadRetryCount = 0
@@ -72,6 +77,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
     /// Отменить подключение, ожидающее PIN-код.
     func cancelPin() {
+        DebugLog.add("ДЕЙСТВИЕ: отмена сопряжения")
         if let id = activeDeviceID { _ = cast.cancelDeviceConnectionRequest(deviceId: id) }
         needsPin = false
         pin = ""
@@ -100,19 +106,27 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         }
     }
     func typeText(_ text: String, submit: Bool) {
+        DebugLog.add("ДЕЙСТВИЕ: ввод текста, символов \(text.count), Enter: \(submit) (сам текст не записывается)")
         guard session != nil else { notice = "Канал пульта ещё не готов"; return }
         let skipped = wire.type(text)
         if submit { wire.press(KeyMap.enter) }
         notice = skipped.isEmpty ? nil : "Не удалось набрать: \(String(skipped)) — используйте голос или поиск YouTube"
     }
     func youtubeSearch(_ text: String) {
-        guard let id = activeDeviceID, !text.isEmpty else { return }
-        _ = cast.sendDirective(deviceId: id, directive: LibSberCast.CastDirective(.showYouTubeSearchDirective(textToSearch: text)))
+        DebugLog.add("ЗАПРОС → YouTube search, символов: \(text.count)")
+        guard let id = activeDeviceID, !text.isEmpty else { DebugLog.error("YouTube search: нет устройства или пустой запрос"); return }
+        let request = cast.sendDirective(deviceId: id, directive: LibSberCast.CastDirective(.showYouTubeSearchDirective(textToSearch: text)))
+        DebugLog.add("YouTube search request id: \(String(describing: request))")
     }
-    func toggleVoice() { voiceState == .idle ? startVoice() : cancelVoice() }
+    func toggleVoice() {
+        DebugLog.add("ДЕЙСТВИЕ: переключение голосового ввода")
+        voiceState == .idle ? startVoice() : cancelVoice()
+    }
     private func startVoice() {
-        guard let id = activeDeviceID, connectedDevice != nil else { notice = "Телевизор не подключён"; return }
+        DebugLog.add("ЗАПРОС → запуск голосового ввода")
+        guard let id = activeDeviceID, connectedDevice != nil else { DebugLog.error("Голос: телевизор не подключён"); notice = "Телевизор не подключён"; return }
         MicStreamer.requestPermission { [weak self] granted in
+            DebugLog.add("ОТВЕТ iOS: разрешение микрофона = \(granted)")
             guard let self else { return }
             guard granted else { self.error = "Нет доступа к микрофону — разрешите в Настройках iOS"; return }
             self.error = nil; self.notice = nil; self.voiceState = .starting
@@ -120,11 +134,13 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         }
     }
     private func cancelVoice() {
+        DebugLog.add("ДЕЙСТВИЕ: остановка голосового ввода")
         if let id = activeDeviceID { cast.voiceTransport.cancelVoiceInput(deviceId: id) }
         endVoice()
     }
     private func endVoice() { mic.stop(); voiceState = .idle }
     private func beginStreaming(deviceId: String) {
+        DebugLog.add("ГОЛОС: начало передачи аудио")
         let transport = cast.voiceTransport
         do {
             try mic.start { chunk in
@@ -132,11 +148,13 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
             }
             voiceState = .listening
         } catch {
+            DebugLog.error("Микрофон: \(error.localizedDescription)")
             self.error = "Микрофон: \(error.localizedDescription)"
             cancelVoice()
         }
     }
     private func handleVoice(deviceId: String, status: LibSberCast.VoiceTransportConversationStatus) {
+        DebugLog.add("ОТВЕТ ТВ ← voice status: \(status)")
         switch status {
         case .listening: if voiceState == .starting { beginStreaming(deviceId: deviceId) }
         case .listeningComplete, .ended, .cancelled: endVoice()
@@ -159,7 +177,8 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func start() {
-        guard !started else { return }
+        DebugLog.add("ЖИЗНЕННЫЙ ЦИКЛ: start()")
+        guard !started else { DebugLog.add("start пропущен: уже запущено"); return }
         started = true
         paused = false
         error = nil
@@ -170,6 +189,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func resume() {
+        DebugLog.add("ЖИЗНЕННЫЙ ЦИКЛ: приложение активно, resume()")
         paused = false
         if !started {
             start()
@@ -190,6 +210,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func pause() {
+        DebugLog.add("ЖИЗНЕННЫЙ ЦИКЛ: приложение уходит в фон, pause()")
         paused = true
         if voiceState != .idle { cancelVoice() }
         // Keep LibSberCast alive across background/foreground transitions.
@@ -252,6 +273,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func stop() {
+        DebugLog.add("ДЕЙСТВИЕ: остановка клиента и обнаружения")
         restartTask?.cancel()
         restartTask = nil
         gamepadRetryTask?.cancel()
@@ -266,6 +288,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func connect(_ device: LibSberCast.SberCastDevice, save: Bool = true) {
+        DebugLog.add("ДЕЙСТВИЕ: подключение к устройству \(device.name), id=\(device.id), save=\(save)")
         gamepadRetryTask?.cancel()
         gamepadRetryTask = nil
         gamepadRequestInFlight = false
@@ -285,7 +308,8 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
         status = "Подключаемся к \(device.name)…"
         let token = cast.accessTokenForDevice(device.id)
-        _ = cast.connectToDevice(deviceId: device.id, accessToken: token)
+        let requestID = cast.connectToDevice(deviceId: device.id, accessToken: token)
+        DebugLog.add("ЗАПРОС → connectToDevice, request id: \(String(describing: requestID)); token не логируется")
     }
 
     func reconnectSavedDeviceIfPossible() {
@@ -305,6 +329,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func forgetSavedDevice() {
+        DebugLog.add("ДЕЙСТВИЕ: забыть сохранённый телевизор")
         gamepadRetryTask?.cancel()
         gamepadRetryTask = nil
         gamepadRequestInFlight = false
@@ -327,8 +352,9 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         pin = code
         error = nil
         status = "Проверяем код…"
-        DebugLog.add("Отправка PIN: \(code.count) символов")
-        _ = cast.confirmDeviceConnectionCode(deviceId: id, code: code)
+        DebugLog.add("ЗАПРОС → подтверждение PIN (\(code.count) символов; значение скрыто)")
+        let requestID = cast.confirmDeviceConnectionCode(deviceId: id, code: code)
+        DebugLog.add("PIN request id: \(String(describing: requestID))")
     }
 
     private func requestGamepadSession() {
@@ -336,10 +362,12 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         gamepadRequestInFlight = true
         let sid = UUID().uuidString
         status = "Запускаем канал пульта…"
-        _ = cast.sendRequest(
+        DebugLog.add("ЗАПРОС → getGamepadSession, sessionId=\(sid)")
+        let requestID = cast.sendRequest(
             deviceId: id,
             request: LibSberCast.CastRequest(type: .getGamepadSessionCastRequest(sessionId: sid))
         )
+        DebugLog.add("getGamepadSession request id: \(String(describing: requestID))")
 
         gamepadRetryTask?.cancel()
         gamepadRetryTask = Task { [weak self] in
@@ -361,6 +389,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func onStatusChanged(status: LibSberCast.CastStatus) {
+        DebugLog.add("ОТВЕТ SDK ← CastStatus: \(status.state)")
         switch status.state {
         case .stopped: self.status = hasSavedDevice ? "Телевизор сохранён" : "Остановлено"
         case .starting: self.status = "Запускаем обнаружение…"
@@ -369,7 +398,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func onError(error: LibSberCast.CastError) {
-        DebugLog.add("SberCast: \(error.msg)")
+        DebugLog.error("SberCast callback: \(error.msg)")
         if error.msg.contains("-72000") {
             // При уже полученной сессии discovery не перезапускаем: рабочий канал не трогаем.
             if connectedDevice != nil && session != nil { return }
@@ -382,6 +411,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func onDevicesChanged(_ devices: [LibSberCast.SberCastDevice]) {
+        DebugLog.add("ОТВЕТ SDK ← список устройств: \(devices.count) шт. [\(devices.map { $0.name }.joined(separator: ", "))]")
         self.devices = devices
         if !devices.isEmpty {
             discoveryRestarts = 0
@@ -396,10 +426,15 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func onCastMessageResponse(message: LibSberCast.CastMessage) {
-        if message.code != .success { error = message.description }
+        DebugLog.add("ОТВЕТ SDK ← CastMessage: code=\(message.code), description=\(message.description)")
+        if message.code != .success {
+            DebugLog.error("CastMessage: \(message.description)")
+            error = message.description
+        }
     }
 
     func onCastRequestResponse(response: LibSberCast.CastRequestResponse) {
+        DebugLog.add("ОТВЕТ SDK ← CastRequestResponse: code=\(response.code), type=\(response.type)")
         // PIN-ответ обрабатываем до общей проверки response.code:
         // SDK может вернуть конкретную причину отказа в status, даже если
         // верхнеуровневый код запроса не равен .success.
@@ -408,6 +443,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
             DebugLog.add("PIN response: request=\(response.code), status=\(pinStatus)")
 
             guard response.code == .success else {
+                DebugLog.error("PIN confirmation rejected: status=\(pinStatus), code=\(response.code)")
                 error = "ТВ отклонил подтверждение: \(pinStatus) (\(response.code))"
                 status = "Не удалось подтвердить подключение"
                 return
@@ -422,18 +458,23 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                 gamepadRetryCount = 0
                 requestGamepadSession()
             case .wrongPin:
+                DebugLog.error("Телевизор вернул wrongPin")
                 error = "Телевизор вернул wrongPin. Проверьте, что код не обновился на экране ТВ."
                 status = "Телевизор отклонил код"
             case .attemptsLimitReached:
+                DebugLog.error("Исчерпан лимит попыток PIN")
                 error = "Телевизор ограничил попытки ввода кода. Запросите новый код на ТВ."
                 status = "Лимит попыток исчерпан"
             case .badSessionIdentifiers:
+                DebugLog.error("Устаревшие идентификаторы сеанса сопряжения")
                 error = "Сеанс сопряжения устарел. Начните подключение заново."
                 status = "Сеанс сопряжения истёк"
             case .disabled:
+                DebugLog.error("PIN pairing disabled by TV")
                 error = "Подключение по PIN отключено на телевизоре."
                 status = "Сопряжение отключено"
             case .error:
+                DebugLog.error("Generic PIN confirmation error from TV")
                 error = "Телевизор вернул ошибку подтверждения PIN."
                 status = "Ошибка сопряжения"
             }
@@ -442,6 +483,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
         guard response.code == .success else {
             gamepadRequestInFlight = false
+            DebugLog.error("Cast request rejected: \(response.code)")
             error = "Запрос к телевизору отклонён (\(response.code))"
             status = connectedDevice == nil ? "Телевизор сохранён, но недоступен" : "Ошибка подключения"
             return
@@ -472,6 +514,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
             guard status == .success else {
                 session = nil
+                DebugLog.error("Gamepad session failed: \(status)")
                 error = "Канал пульта: \(status)"
                 self.status = "Канал пульта недоступен — повторяем…"
                 gamepadRetryCount += 1
@@ -481,6 +524,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
             guard !sessionId.isEmpty, port > 0, !aesKey.isEmpty, !ipV4List.isEmpty else {
                 session = nil
+                DebugLog.error("Gamepad response has incomplete session parameters")
                 error = "Телевизор вернул неполные параметры канала пульта"
                 self.status = "Неполные параметры канала — повторяем…"
                 gamepadRetryCount += 1
