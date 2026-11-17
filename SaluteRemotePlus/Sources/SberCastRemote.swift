@@ -93,7 +93,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, !self.paused, self.started else { return }
-                DebugLog.add("Перезапуск поиска (попытка \\(self.discoveryRestarts))")
+                DebugLog.add("Перезапуск поиска (попытка \(self.discoveryRestarts))")
                 self.cast.stop()
                 self.cast.start()
             }
@@ -364,7 +364,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     }
 
     func onError(error: LibSberCast.CastError) {
-        DebugLog.add("SberCast: \\(error.msg)")
+        DebugLog.add("SberCast: \(error.msg)")
         if error.msg.contains("-72000") {
             // При уже полученной сессии discovery не перезапускаем: рабочий канал не трогаем.
             if connectedDevice != nil && session != nil { return }
@@ -462,7 +462,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
             gamepadRetryCount = 0
             error = nil
             notice = nil
-            DebugLog.add("Сессия пульта: порт \\(port), версия \\(serviceVersion), адреса \\(ipV4List.joined(separator: ","))")
+            DebugLog.add("Сессия пульта: порт \(port), версия \(serviceVersion), адреса \(ipV4List.joined(separator: ","))")
             session = GamepadSession(
                 sessionId: sessionId,
                 port: port,
