@@ -244,10 +244,10 @@ struct LiveDebugBar: View {
                     .font(.system(size: 12, weight: .bold))
                     .buttonStyle(.plain)
             }
-            ForEach(Array(log.lines.suffix(3).enumerated()), id: \.offset) { _, line in
-                Text(line)
+            ForEach(Array(log.lines.suffix(3).enumerated()), id: \.offset) { item in
+                Text(item.element)
                     .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(line.contains("❌") || line.contains("✖") || line.contains("ОШИБКА") ? .red : .white.opacity(0.78))
+                    .foregroundStyle(item.element.contains("❌") || item.element.contains("✖") || item.element.contains("ОШИБКА") ? Color.red : Color.white.opacity(0.78))
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
