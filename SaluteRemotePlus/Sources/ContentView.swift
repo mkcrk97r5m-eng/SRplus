@@ -10,6 +10,9 @@ struct ContentView: View {
             LinearGradient(colors: [.black, Color(red: 0.08, green: 0.04, blue: 0.13), .black], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
             if remote.connectedDevice != nil { RemotePadView(remote: remote) } else { ConnectionView(remote: remote) }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            LiveDebugBar()
+        }
         .preferredColorScheme(.dark)
         .sheet(isPresented: Binding(
             get: { remote.needsPin },
@@ -215,5 +218,43 @@ struct PinSheet: View {
         .padding(.horizontal, 24)
         .preferredColorScheme(.dark)
         .onAppear { focused = true }
+    }
+}
+
+
+/// Постоянная компактная консоль: последние события всегда видны внизу экрана.
+struct LiveDebugBar: View {
+    @ObservedObject private var log = DebugLog.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Circle().fill(.green).frame(width: 6, height: 6)
+                Text("LIVE DEBUG").font(.system(size: 9, weight: .bold, design: .monospaced))
+                Spacer()
+                Text("\(log.lines.count) событий").font(.system(size: 9, design: .monospaced)).foregroundStyle(.white.opacity(0.45))
+                Button {
+                    UIPasteboard.general.string = log.lines.joined(separator: "\n")
+                    DebugLog.add("Лог скопирован в буфер обмена")
+                } label: {
+                    Image(systemName: "doc.on.doc").font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                Button("×") { log.clear(); DebugLog.add("Лог очищен") }
+                    .font(.system(size: 12, weight: .bold))
+                    .buttonStyle(.plain)
+            }
+            ForEach(Array(log.lines.suffix(3).enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(line.contains("❌") || line.contains("✖") || line.contains("ОШИБКА") ? .red : .white.opacity(0.78))
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.94))
+        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.16)).frame(height: 0.5) }
     }
 }
