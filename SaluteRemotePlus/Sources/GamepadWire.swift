@@ -25,6 +25,22 @@ final class GamepadWire: ObservableObject {
 
     func prepare(session: GamepadSession) {
         queue.async {
+            // resume() and the session didSet can both call prepare().
+            // Keep the live transport when every session parameter is unchanged.
+            // A refreshed session (even with the same sessionId) must reconnect.
+            if let current = self.session,
+               current.sessionId == session.sessionId,
+               current.port == session.port,
+               current.serviceVersion == session.serviceVersion,
+               current.aesKey == session.aesKey,
+               current.ipv4 == session.ipv4,
+               self.transportReady,
+               self.connection != nil,
+               self.key != nil,
+               self.iv != nil {
+                return
+            }
+
             self.stopLocked()
             self.session = session
             self.key = Self.decodeKey(session.aesKey)
