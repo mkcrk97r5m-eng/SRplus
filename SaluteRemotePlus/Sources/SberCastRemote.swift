@@ -173,13 +173,12 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                     self.permissionBrowser = nil
                     guard !self.paused else { return }
 
-                    // -72000 is the Bonjour/local-network service error. Do not turn
-                    // it into a permanent connection failure; retry after iOS settles.
-                    self.error = error.errorCode == -72000
-                        ? nil
-                        : "Доступ к локальной сети: \(error.localizedDescription)"
-                    self.status = self.hasSavedDevice ? "Восстанавливаем телевизор…" : "Ищем телевизор…"
-                    self.scheduleBonjourRetry()
+                    // The probe is only used to trigger iOS Local Network permission.
+                    // It must never block LibSberCast discovery: the previous working
+                    // implementation started the SDK even when NWBrowser failed.
+                    self.error = "Доступ к локальной сети: \(error.localizedDescription) (код \(error.errorCode))"
+                    self.status = self.hasSavedDevice ? "Ищем сохранённый телевизор…" : "Ищем телевизор…"
+                    self.cast.start()
                 case .cancelled:
                     self.permissionBrowser = nil
                 default:
