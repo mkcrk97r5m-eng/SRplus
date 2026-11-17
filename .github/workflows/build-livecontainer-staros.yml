@@ -1,0 +1,74 @@
+name: Build LiveContainer with StarOS Bonjour fix
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/build-livecontainer-staros.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    name: Patch official LiveContainer IPA
+    runs-on: macos-15
+    steps:
+      - name: Download latest official LiveContainer nightly
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://github.com/LiveContainer/LiveContainer/releases/download/nightly/LiveContainer.ipa" \
+            --output LiveContainer-upstream.ipa
+          test -s LiveContainer-upstream.ipa
+
+      - name: Add StarOS Bonjour service and package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf Payload LiveContainer-StarOS.ipa
+          unzip -q LiveContainer-upstream.ipa
+          APP="Payload/LiveContainer.app"
+          PLIST="$APP/Info.plist"
+
+          test -d "$APP"
+          test -f "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$PLIST" >/dev/null
+          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$PLIST" >/dev/null
+
+          if ! /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$PLIST" | grep -Fqx "_staros._tcp"; then
+            /usr/libexec/PlistBuddy -c "Add :NSBonjourServices: string _staros._tcp" "$PLIST"
+          fi
+
+          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$PLIST" | grep -Fqx "_staros._tcp"
+          echo "Patched bundle: $APP"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
+
+          # SideStore must re-sign the modified app with the user's own certificate.
+          find Payload -type d -name "_CodeSignature" -prune -exec rm -rf {} +
+          find Payload -type f -name "embedded.mobileprovision" -delete
+          xattr -cr Payload || true
+
+          ditto -c -k --sequesterRsrc --keepParent Payload LiveContainer-StarOS.ipa
+          test -s LiveContainer-StarOS.ipa
+
+          # Verify the final archive contains the patched host Info.plist.
+          unzip -p LiveContainer-StarOS.ipa Payload/LiveContainer.app/Info.plist > /tmp/LiveContainer-Info.plist
+          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" /tmp/LiveContainer-Info.plist | grep -Fqx "_staros._tcp"
+          unzip -Z1 LiveContainer-StarOS.ipa | grep -Fx "Payload/LiveContainer.app/Info.plist"
+
+          {
+            echo "### LiveContainer Bonjour patch"
+            echo "- Added `_staros._tcp` to the host app's `NSBonjourServices`."
+            echo "- Based on the official LiveContainer nightly IPA."
+            echo "- This IPA is unsigned after patching. Install/update it through SideStore so SideStore re-signs it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload patched IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveContainer-StarOS-Bonjour-IPA
+          path: LiveContainer-StarOS.ipa
+          if-no-files-found: error
+          retention-days: 14
