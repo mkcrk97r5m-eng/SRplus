@@ -87,6 +87,7 @@ final class GamepadWire: ObservableObject {
     private var iv: Data?
     private var hosts: [String] = []
     private var hostIndex = 0
+    private var dropRetries = 0
     private var pending: [(Int32, Bool)] = []
     private var sendInFlight = false
     private var order: UInt32 = 0
@@ -251,6 +252,7 @@ final class GamepadWire: ObservableObject {
                     isReady = true
                     DebugLog.add("✓ канал открыт \(host)")
                     self.setReady(true)
+                    self.dropRetries = 0
                     self.finishOpen(true)
                     if let conn { self.receiveLoop(conn, generation: currentGeneration) }
                     self.flushIfReady()
@@ -280,6 +282,36 @@ final class GamepadWire: ObservableObject {
         openNext()
     }
 
+    /// Восстанавливает транспорт после обрыва уже открытого канала.
+    /// Сначала пробует оставшиеся адреса, затем ограниченно переподключается к первому.
+    private func reconnectAfterDrop() {
+        connection?.cancel()
+        connection = nil
+        setReady(false)
+        sendInFlight = false
+        guard openCompletion == nil, session != nil else { return }
+
+        if hostIndex + 1 < hosts.count {
+            hostIndex += 1
+            DebugLog.add("↻ TCP оборвался — пробуем следующий адрес (\(hostIndex + 1)/\(hosts.count))")
+            openNext()
+        } else if !hosts.isEmpty, dropRetries < 2 {
+            dropRetries += 1
+            hostIndex = 0
+            let currentGen = generation
+            DebugLog.add("↻ TCP оборвался — повторное подключение к \(hosts[0]) через 0,8 сек (\(dropRetries)/2)")
+            queue.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self,
+                      currentGen == self.generation,
+                      self.session != nil,
+                      self.connection == nil else { return }
+                self.openNext()
+            }
+        } else {
+            DebugLog.add("✖︎ TCP: исчерпаны попытки восстановления канала")
+        }
+    }
+
     private func receiveLoop(_ conn: NWConnection, generation: Int) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, complete, error in
             guard let self else { return }
@@ -291,12 +323,12 @@ final class GamepadWire: ObservableObject {
                 }
                 if let error {
                     DebugLog.add("← ошибка приёма: \(error.localizedDescription)")
-                    self.advance()
+                    self.reconnectAfterDrop()
                     return
                 }
                 if complete && self.cfg.transport == .tcp {
                     DebugLog.add("← ТВ закрыл TCP-соединение")
-                    self.advance()
+                    self.reconnectAfterDrop()
                     return
                 }
                 self.receiveLoop(conn, generation: generation)
