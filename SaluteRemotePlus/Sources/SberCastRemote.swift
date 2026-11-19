@@ -625,6 +625,12 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
             await MainActor.run {
                 guard self.gamepadRequestInFlight, self.session == nil else { return }
                 self.gamepadRequestInFlight = false
+                guard self.isActiveDeviceConnected else {
+                    self.awaitingGamepadAfterConnect = true
+                    DebugLog.add("Повтор getGamepadSession отменён: ТВ уже не isConnected, ждём восстановления SDK")
+                    self.status = "Ожидаем защищённое подключение телевизора…"
+                    return
+                }
                 self.gamepadRetryCount += 1
                 if self.gamepadRetryCount <= 5 {
                     self.requestGamepadSession()
