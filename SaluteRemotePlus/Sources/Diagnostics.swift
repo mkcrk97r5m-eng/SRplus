@@ -39,10 +39,12 @@ final class WireProbe: ObservableObject {
                     continue
                 }
 
-                wire.press(24)
-                try? await Task.sleep(nanoseconds: 900_000_000)
-                wire.press(25)
-                try? await Task.sleep(nanoseconds: 1_300_000_000)
+                // Тестируем D-pad Вправо (22) и Влево (21): громкость на части ТВ идёт
+                // через SberCast setVolumeRequest, а не через gamepad-канал.
+                wire.press(22)
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                wire.press(21)
+                try? await Task.sleep(nanoseconds: 1_100_000_000)
             }
 
             guard let self, !Task.isCancelled else { return }
@@ -90,7 +92,7 @@ struct DiagnosticsSheet: View {
 
                     if let session = remote.session {
                         if probe.running {
-                            Text("Вариант \(probe.index) из \(probe.total). Смотрите на ТВ: если появилась полоска громкости, нажмите «Работает».")
+                            Text("Вариант \(probe.index) из \(probe.total). Смотрите на фокус на экране ТВ: если курсор сдвинулся вправо/влево, нажмите «Работает».")
                                 .font(.footnote)
                                 .foregroundStyle(.orange)
                             HStack {
@@ -103,16 +105,16 @@ struct DiagnosticsSheet: View {
                             Button {
                                 probe.start(wire: wire, session: session)
                             } label: {
-                                Label("Автоподбор протокола", systemImage: "wand.and.stars")
+                                Label("Автоподбор UDP-протокола (D-pad)", systemImage: "wand.and.stars")
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 6)
                             }
                             .buttonStyle(.borderedProminent)
 
                             HStack {
-                                Button("Громче") { wire.press(24) }.buttonStyle(.bordered)
-                                Button("Тише") { wire.press(25) }.buttonStyle(.bordered)
-                                Button("Переоткрыть канал") { wire.prepare(session: session) }.buttonStyle(.bordered)
+                                Button("Вправо →") { wire.press(22) }.buttonStyle(.bordered)
+                                Button("← Влево") { wire.press(21) }.buttonStyle(.bordered)
+                                Button("Переоткрыть") { wire.prepare(session: session) }.buttonStyle(.bordered)
                             }
                             .font(.footnote)
 
@@ -123,10 +125,12 @@ struct DiagnosticsSheet: View {
                             .buttonStyle(.bordered)
                             .font(.footnote)
 
+                            sberCastDirectTests
                             manualPickers
                             manualButtonTests
                         }
                     } else {
+                        sberCastDirectTests
                         Button("Запросить канал заново") { remote.reconnectChannel() }
                             .buttonStyle(.borderedProminent)
                     }
@@ -197,13 +201,29 @@ struct DiagnosticsSheet: View {
             .font(.caption)
     }
 
+    private var sberCastDirectTests: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Прямые команды SberCast (без UDP 6801)").font(.footnote).foregroundStyle(.white.opacity(0.5))
+            HStack {
+                Button("Громче") { remote.send(.volumeUp) }.buttonStyle(.bordered)
+                Button("Тише") { remote.send(.volumeDown) }.buttonStyle(.bordered)
+                Button("Mute") { remote.send(.mute) }.buttonStyle(.bordered)
+                Button("Найти пульт") { remote.findRemote() }.buttonStyle(.bordered)
+            }
+            .font(.caption)
+        }
+        .padding(12)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+    }
+
     private var manualPickers: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Ручной выбор").font(.footnote).foregroundStyle(.white.opacity(0.5))
             picker("Транспорт", WireConfig.Transport.allCases, \.transport) { $0.rawValue.uppercased() }
+            picker("Шифр", WireConfig.CipherMode.allCases, \.cipher) { $0.title }
             picker("Формат", WireConfig.Framing.allCases, \.framing) { $0.title }
             picker("Ключ", WireConfig.KeyMode.allCases, \.keyMode) { $0.rawValue }
-            picker("IV", WireConfig.IVMode.allCases, \.ivMode) { $0.rawValue }
+            picker("IV", WireConfig.IVMode.allCases, \.ivMode) { $0.title }
         }
     }
 
