@@ -291,17 +291,18 @@ final class GamepadWire: ObservableObject {
                 }
                 if let error {
                     DebugLog.add("← ошибка приёма: \(error.localizedDescription)")
+                    self.advance()
                     return
                 }
                 if complete && self.cfg.transport == .tcp {
-                    DebugLog.add("← ТВ закрыл соединение")
+                    DebugLog.add("← ТВ закрыл TCP-соединение")
+                    self.advance()
                     return
                 }
                 self.receiveLoop(conn, generation: generation)
             }
         }
     }
-
     private func flushIfReady() {
         guard transportReady, !sendInFlight, !pending.isEmpty,
               let connection, let key, let iv else { return }
