@@ -21,7 +21,7 @@ struct WireConfig: Codable, Equatable {
             }
         }
     }
-    enum KeyMode: String, Codable, CaseIterable { case auto, hex, base64, utf8 }
+    enum KeyMode: String, Codable, CaseIterable { case auto, hex, base64, utf8, sha256 }
     enum IVMode: String, Codable, CaseIterable { case uuidBytes, utf8Prefix }
 
     var transport: Transport = .tcp
@@ -200,11 +200,12 @@ final class GamepadWire: ObservableObject {
         }
         key = Self.deriveKey(session.aesKey, cfg.keyMode)
         iv = Self.deriveIV(session.sessionId, cfg.ivMode)
-        guard key != nil, iv != nil else {
-            DebugLog.add("⚠️ Ключ/IV не подходят под режим \(cfg.keyMode.rawValue)/\(cfg.ivMode.rawValue)")
+        guard let resolvedKey = key, let resolvedIV = iv else {
+            DebugLog.add("⚠️ Ключ/IV не подходят под режим \(cfg.keyMode.rawValue)/\(cfg.ivMode.rawValue) (\(Self.describeKey(session.aesKey)))")
             finishOpen(false)
             return
         }
+        DebugLog.add("🔑 Ключ \(resolvedKey.count) Б (\(cfg.keyMode.rawValue)), IV \(resolvedIV.count) Б (\(cfg.ivMode.rawValue)) [\(Self.describeKey(session.aesKey))]")
         hosts = Array(session.ipv4)
         hostIndex = 0
         order = 0
@@ -438,36 +439,89 @@ final class GamepadWire: ObservableObject {
         }
     }
 
+    static func decodeBase64Flexible(_ string: String) -> Data? {
+        var cleaned = string
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        guard !cleaned.isEmpty else { return nil }
+        let remainder = cleaned.count % 4
+        if remainder != 0 {
+            cleaned.append(String(repeating: "=", count: 4 - remainder))
+        }
+        return Data(base64Encoded: cleaned)
+    }
+
+    static func decodeHexFlexible(_ string: String) -> Data? {
+        var cleaned = string
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+        if cleaned.hasPrefix("0x") || cleaned.hasPrefix("0X") {
+            cleaned.removeFirst(2)
+        }
+        cleaned = cleaned
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: ":", with: "")
+        guard !cleaned.isEmpty, cleaned.count % 2 == 0 else { return nil }
+        var data = Data(capacity: cleaned.count / 2)
+        var index = cleaned.startIndex
+        while index < cleaned.endIndex {
+            let next = cleaned.index(index, offsetBy: 2)
+            guard let byte = UInt8(cleaned[index..<next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
+        }
+        return data
+    }
+
+    private static func sha256(_ data: Data) -> Data {
+        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes { bytes in
+            _ = CC_SHA256(bytes.baseAddress, CC_LONG(data.count), &hash)
+        }
+        return Data(hash)
+    }
+
     static func deriveKey(_ string: String, _ mode: WireConfig.KeyMode) -> Data? {
         let validLengths = [16, 24, 32]
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
         switch mode {
         case .auto:
-            return deriveKey(string, .base64) ?? deriveKey(string, .hex) ?? deriveKey(string, .utf8)
+            return deriveKey(string, .base64)
+                ?? deriveKey(string, .hex)
+                ?? deriveKey(string, .utf8)
+                ?? deriveKey(string, .sha256)
         case .hex:
-            let hex = string.replacingOccurrences(of: "-", with: "")
-            guard hex.count % 2 == 0 else { return nil }
-            var data = Data()
-            var index = hex.startIndex
-            while index < hex.endIndex {
-                let next = hex.index(index, offsetBy: 2)
-                guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
-                data.append(byte)
-                index = next
-            }
-            return validLengths.contains(data.count) ? data : nil
-        case .base64:
-            guard let data = Data(base64Encoded: string), validLengths.contains(data.count) else { return nil }
+            guard let data = decodeHexFlexible(trimmed), validLengths.contains(data.count) else { return nil }
             return data
+        case .base64:
+            guard let data = decodeBase64Flexible(trimmed) else { return nil }
+            if validLengths.contains(data.count) { return data }
+            if let inner = String(data: data, encoding: .utf8),
+               let hexData = decodeHexFlexible(inner),
+               validLengths.contains(hexData.count) {
+                return hexData
+            }
+            return nil
         case .utf8:
-            let data = Data(string.utf8)
+            let data = Data(trimmed.utf8)
             return validLengths.contains(data.count) ? data : nil
+        case .sha256:
+            return sha256(Data(trimmed.utf8))
         }
     }
 
     static func describeKey(_ string: String) -> String {
-        let isHex = string.allSatisfy { $0.isHexDigit }
-        let isBase64 = Data(base64Encoded: string) != nil
-        return "длина \(string.count), hex:\(isHex ? "да" : "нет"), base64:\(isBase64 ? "да" : "нет")"
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasWhitespace = string.count != trimmed.count
+            || trimmed.rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+        let base64Bytes = decodeBase64Flexible(trimmed)?.count
+        let hexBytes = decodeHexFlexible(trimmed)?.count
+        let symbols = [":", ",", "{", "[", "-", "_"].filter { trimmed.contains($0) }.joined()
+        return "len:\(string.count)/trim:\(trimmed.count), ws:\(hasWhitespace ? "да" : "нет"), b64:\(base64Bytes.map(String.init) ?? "—")Б, hex:\(hexBytes.map(String.init) ?? "—")Б, sym:\(symbols.isEmpty ? "—" : symbols)"
     }
 
     private static func aesCBCEncrypt(_ data: Data, key: Data, iv: Data) -> Data? {
