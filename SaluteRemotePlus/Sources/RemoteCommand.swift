@@ -10,6 +10,7 @@ enum RemoteCommand: String, CaseIterable, Identifiable {
     case ok = "OK"
     case back = "BACK"
     case home = "HOME"
+    case settings = "SETTINGS"
     case search = "SEARCH"
     case source = "SOURCE"
     case volumeUp = "VOLUME_UP"
@@ -31,6 +32,7 @@ enum RemoteCommand: String, CaseIterable, Identifiable {
         case .ok: return 23
         case .back: return 4
         case .home: return 3
+        case .settings: return 176
         case .search: return 84
         case .source: return 178
         case .volumeUp: return 24
