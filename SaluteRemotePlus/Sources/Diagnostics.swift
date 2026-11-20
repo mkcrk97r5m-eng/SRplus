@@ -187,8 +187,10 @@ struct DiagnosticsSheet: View {
             HStack {
                 testButton("Назад", code: 4)
                 testButton("Домой", code: 3)
-                testButton("Громче", code: 24)
-                testButton("Тише", code: 25)
+                testButton("Настр.", code: 176)
+                Button("Пит. 1.2с") { wire.longPress(26, duration: 1.2) }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
             }
         }
         .padding(12)
@@ -224,6 +226,7 @@ struct DiagnosticsSheet: View {
             picker("Формат", WireConfig.Framing.allCases, \.framing) { $0.title }
             picker("Ключ", WireConfig.KeyMode.allCases, \.keyMode) { $0.rawValue }
             picker("IV", WireConfig.IVMode.allCases, \.ivMode) { $0.title }
+            picker("Данные", WireConfig.PayloadMode.allCases, \.payloadMode) { $0.title }
         }
     }
 
