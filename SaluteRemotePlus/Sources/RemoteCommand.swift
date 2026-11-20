@@ -21,27 +21,32 @@ enum RemoteCommand: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var keyCode: Int {
+    /// Официальные коды кнопок протокола Salute TV Gamepad (`Message.Gamepad.Button.code`).
+    var buttonCode: UInt32 {
         switch self {
-        case .power: return 26
-        case .mute: return 164
-        case .up: return 19
-        case .down: return 20
-        case .left: return 21
-        case .right: return 22
-        case .ok: return 23
-        case .back: return 4
-        case .home: return 3
-        case .settings: return 176
+        case .up: return 20
+        case .down: return 21
+        case .left: return 22
+        case .right: return 23
+        case .ok: return 24
+        case .back: return 34
+        case .home: return 35
+        case .volumeUp: return 37
+        case .volumeDown: return 38
+        case .power: return 39
+        case .mute: return 40
+        // Команды ниже преимущественно уходят через LibSberCast (deeplink / mediaCommand),
+        // значения оставлены как безопасные резервные коды.
+        case .settings: return 35
         case .search: return 84
         case .source: return 178
-        case .volumeUp: return 24
-        case .volumeDown: return 25
-        case .channelUp: return 166
-        case .channelDown: return 167
-        case .playPause: return 85
+        case .channelUp: return 45
+        case .channelDown: return 46
+        case .playPause: return 24
         }
     }
+
+    var keyCode: Int { Int(buttonCode) }
 }
 
 struct GamepadSession {
@@ -52,24 +57,8 @@ struct GamepadSession {
     let ipv4: [String]
 }
 
-/// Android KeyEvent-коды для набора текста.
+/// Linux input-event коды для `Message.Gamepad.KeyboardSignal` (как в официальном приложении Салют).
 enum KeyMap {
-    static let backspace: Int32 = 67
-    static let enter: Int32 = 66
-    static func code(for ch: Character) -> Int32? {
-        let s = String(ch).lowercased()
-        guard let u = s.unicodeScalars.first, s.unicodeScalars.count == 1 else { return nil }
-        switch u.value {
-        case 97...122: return Int32(u.value - 97 + 29)
-        case 48...57: return Int32(u.value - 48 + 7)
-        case 32: return 62
-        case 44: return 55
-        case 46: return 56
-        case 45: return 69
-        case 47: return 76
-        case 64: return 77
-        case 10: return enter
-        default: return nil
-        }
-    }
+    static let backspace: Int32 = 14   // KEY_BACKSPACE
+    static let enter: Int32 = 28       // KEY_ENTER
 }

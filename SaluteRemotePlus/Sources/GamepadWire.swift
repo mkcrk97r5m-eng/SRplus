@@ -4,37 +4,40 @@ import Security
 import CommonCrypto
 import CryptoKit
 
-/// Вариант формата канала «gamepad» (порт 6801 на Salute TV использует UDP + AES-256).
+/// Конфигурация UDP-канала пульта Salute TV (`gamepad`, порт 6801).
+/// Базовый профиль (.baseline) точно соответствует официальному протоколу Салют:
+/// UDP · AES-256-CBC/PKCS7 · AES(BE32(order) + Protobuf3) · IV = 16 байт UUID(sessionId) ·
+/// обязательный пакет Introduction (field 21, apiVersion "1.7.2") + keepalive Ping (field 15) раз в 500 мс.
 struct WireConfig: Codable, Equatable {
     enum Transport: String, Codable, CaseIterable { case udp, tcp }
 
     enum CipherMode: String, Codable, CaseIterable {
-        case gcm
         case cbc
+        case gcm
         case ecb
 
         var title: String {
             switch self {
-            case .gcm: return "AES-GCM"
             case .cbc: return "AES-CBC"
+            case .gcm: return "AES-GCM"
             case .ecb: return "AES-ECB"
             }
         }
     }
 
     enum Framing: String, Codable, CaseIterable {
+        case encOrder
         case rawEnc
         case orderEnc
-        case encOrder
         case lenOrderEnc
         case lenEncOrder
 
         var hasLength: Bool { self == .lenOrderEnc || self == .lenEncOrder }
         var title: String {
             switch self {
+            case .encOrder: return "AES(order+msg)"
             case .rawEnc: return "AES(msg)"
             case .orderEnc: return "order|AES(msg)"
-            case .encOrder: return "AES(order+msg)"
             case .lenOrderEnc: return "len|order|AES"
             case .lenEncOrder: return "len|AES(order+msg)"
             }
@@ -44,15 +47,15 @@ struct WireConfig: Codable, Equatable {
     enum KeyMode: String, Codable, CaseIterable { case auto, base64, hex, utf8 }
 
     enum IVMode: String, Codable, CaseIterable {
-        case prefixedRandom
         case uuidBytes
+        case prefixedRandom
         case utf8Lower
         case zero
 
         var title: String {
             switch self {
-            case .prefixedRandom: return "iv+enc"
             case .uuidBytes: return "uuid"
+            case .prefixedRandom: return "iv+enc"
             case .utf8Lower: return "utf8-low"
             case .zero: return "zero"
             }
@@ -67,7 +70,7 @@ struct WireConfig: Codable, Equatable {
 
         var title: String {
             switch self {
-            case .protoBool: return "pb:1/0"
+            case .protoBool: return "Salute pb3"
             case .protoAction: return "pb:0/1"
             case .protoFlat: return "flat:1/0"
             case .protoFlatAction: return "flat:0/1"
@@ -76,18 +79,18 @@ struct WireConfig: Codable, Equatable {
     }
 
     var transport: Transport = .udp
-    var cipher: CipherMode = .gcm
-    var framing: Framing = .rawEnc
+    var cipher: CipherMode = .cbc
+    var framing: Framing = .encOrder
     var keyMode: KeyMode = .auto
-    var ivMode: IVMode = .prefixedRandom
+    var ivMode: IVMode = .uuidBytes
     var payloadMode: PayloadMode = .protoBool
 
     init(
         transport: Transport = .udp,
-        cipher: CipherMode = .gcm,
-        framing: Framing = .rawEnc,
+        cipher: CipherMode = .cbc,
+        framing: Framing = .encOrder,
         keyMode: KeyMode = .auto,
-        ivMode: IVMode = .prefixedRandom,
+        ivMode: IVMode = .uuidBytes,
         payloadMode: PayloadMode = .protoBool
     ) {
         self.transport = transport
@@ -101,61 +104,36 @@ struct WireConfig: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         transport = try c.decodeIfPresent(Transport.self, forKey: .transport) ?? .udp
-        cipher = try c.decodeIfPresent(CipherMode.self, forKey: .cipher) ?? .gcm
-        framing = try c.decodeIfPresent(Framing.self, forKey: .framing) ?? .rawEnc
+        cipher = try c.decodeIfPresent(CipherMode.self, forKey: .cipher) ?? .cbc
+        framing = try c.decodeIfPresent(Framing.self, forKey: .framing) ?? .encOrder
         keyMode = try c.decodeIfPresent(KeyMode.self, forKey: .keyMode) ?? .auto
-        ivMode = try c.decodeIfPresent(IVMode.self, forKey: .ivMode) ?? .prefixedRandom
+        ivMode = try c.decodeIfPresent(IVMode.self, forKey: .ivMode) ?? .uuidBytes
         payloadMode = try c.decodeIfPresent(PayloadMode.self, forKey: .payloadMode) ?? .protoBool
     }
 
+    /// Официальный протокол Salute TV.
     static let baseline = WireConfig()
-    private static let storeKey = "SaluteRemotePlus.wireConfig.v2"
+    private static let storeKey = "SaluteRemotePlus.wireConfig.v3"
 
     var title: String {
         let ivLabel = cipher == .ecb ? "none" : ivMode.title
         return "\(transport.rawValue.uppercased()) · \(cipher.title) · \(framing.title) · iv:\(ivLabel) · \(payloadMode.title)"
     }
 
-    /// Компактный список UDP-кандидатов для автоподбора (TCP 6801 не слушает).
     static func candidates(for session: GamepadSession) -> [WireConfig] {
         guard GamepadWire.deriveKey(session.aesKey, .auto) != nil else { return [] }
+        var result: [WireConfig] = [.baseline]
 
-        let udpFramings: [Framing] = [.rawEnc, .orderEnc, .encOrder]
-        var result: [WireConfig] = []
-
-        // 1. Стандартный protobuf (pressed = 1/0): AES-GCM, AES-CBC, AES-ECB
-        for framing in udpFramings {
-            for ivMode in [IVMode.prefixedRandom, .uuidBytes, .utf8Lower, .zero] {
-                if ivMode == .prefixedRandom || GamepadWire.deriveIV(session.sessionId, ivMode, length: 12) != nil {
-                    result.append(WireConfig(transport: .udp, cipher: .gcm, framing: framing, keyMode: .auto, ivMode: ivMode, payloadMode: .protoBool))
-                }
-            }
+        let extras: [WireConfig] = [
+            WireConfig(transport: .udp, cipher: .cbc, framing: .encOrder, keyMode: .auto, ivMode: .utf8Lower, payloadMode: .protoBool),
+            WireConfig(transport: .udp, cipher: .cbc, framing: .encOrder, keyMode: .auto, ivMode: .zero, payloadMode: .protoBool),
+            WireConfig(transport: .udp, cipher: .cbc, framing: .orderEnc, keyMode: .auto, ivMode: .uuidBytes, payloadMode: .protoBool),
+            WireConfig(transport: .udp, cipher: .gcm, framing: .encOrder, keyMode: .auto, ivMode: .uuidBytes, payloadMode: .protoBool),
+            WireConfig(transport: .udp, cipher: .gcm, framing: .rawEnc, keyMode: .auto, ivMode: .prefixedRandom, payloadMode: .protoBool),
+        ]
+        for cfg in extras where !result.contains(cfg) {
+            result.append(cfg)
         }
-        for framing in udpFramings {
-            for ivMode in [IVMode.prefixedRandom, .zero, .uuidBytes, .utf8Lower] {
-                if ivMode == .prefixedRandom || GamepadWire.deriveIV(session.sessionId, ivMode, length: 16) != nil {
-                    result.append(WireConfig(transport: .udp, cipher: .cbc, framing: framing, keyMode: .auto, ivMode: ivMode, payloadMode: .protoBool))
-                }
-            }
-        }
-        for framing in udpFramings {
-            result.append(WireConfig(transport: .udp, cipher: .ecb, framing: framing, keyMode: .auto, ivMode: .zero, payloadMode: .protoBool))
-        }
-
-        // 2. Android KeyEvent action (ACTION_DOWN=0, ACTION_UP=1) и плоский protobuf
-        for payloadMode in [PayloadMode.protoAction, .protoFlat, .protoFlatAction] {
-            for framing in [Framing.rawEnc, .orderEnc, .encOrder] {
-                for ivMode in [IVMode.prefixedRandom, .uuidBytes, .zero] {
-                    if ivMode == .prefixedRandom || GamepadWire.deriveIV(session.sessionId, ivMode, length: 12) != nil {
-                        result.append(WireConfig(transport: .udp, cipher: .gcm, framing: framing, keyMode: .auto, ivMode: ivMode, payloadMode: payloadMode))
-                    }
-                    if ivMode == .prefixedRandom || GamepadWire.deriveIV(session.sessionId, ivMode, length: 16) != nil {
-                        result.append(WireConfig(transport: .udp, cipher: .cbc, framing: framing, keyMode: .auto, ivMode: ivMode, payloadMode: payloadMode))
-                    }
-                }
-            }
-        }
-
         return result
     }
 
@@ -175,7 +153,11 @@ struct WireConfig: Codable, Equatable {
 
 final class GamepadWire: ObservableObject {
     @Published private(set) var ready = false
+    @Published private(set) var handshakeConfirmed = false
     @Published private(set) var config = WireConfig.load()
+
+    private static let clientName = "SaluteRemotePlus"
+    private static let gamepadApiVersion = "1.7.2"
 
     private let queue = DispatchQueue(label: "SaluteRemotePlus.GamepadWire")
     private var connection: NWConnection?
@@ -183,9 +165,27 @@ final class GamepadWire: ObservableObject {
     private var cfg = WireConfig.load()
     private var key: Data?
     private var staticIV: Data?
+
+    private enum OutboundPayload {
+        case introduction(sessionId: String)
+        case button(code: UInt32, pressed: Bool)
+        case keyboardSignal(keyCode: Int32, pressed: Bool)
+        case keyboardSymbols(text: String)
+        case launchApp(signal: UInt32, packageName: String)
+
+        var logLabel: String {
+            switch self {
+            case .introduction: return "Introduction"
+            case .button(let code, let pressed): return "Button \(code) \(pressed ? "↓" : "↑")"
+            case .keyboardSignal(let keyCode, let pressed): return "Key \(keyCode) \(pressed ? "↓" : "↑")"
+            case .keyboardSymbols(let text): return "Symbols(\(text.count) симв.)"
+            case .launchApp(_, let pkg): return "LaunchApp(\(pkg))"
+            }
+        }
+    }
+
     private struct PendingEvent {
-        let code: Int32
-        let pressed: Bool
+        let payload: OutboundPayload
         let delayAfter: TimeInterval
     }
 
@@ -194,7 +194,11 @@ final class GamepadWire: ObservableObject {
     private var pending: [PendingEvent] = []
     private var sendInFlight = false
     private var delayWorkItem: DispatchWorkItem?
+    private var pingTimer: DispatchSourceTimer?
+    private var introRetryWorkItem: DispatchWorkItem?
+    private var introAcked = false
     private var order: UInt32 = 0
+    private var lastServerOrder: Int32 = -1
     private var generation = 0
     private var sentLogged = 0
     private var transportReady = false
@@ -218,6 +222,7 @@ final class GamepadWire: ObservableObject {
                self.transportReady,
                self.connection != nil,
                self.key != nil {
+                self.startPingTimerLocked(generation: self.generation)
                 return
             }
 
@@ -259,56 +264,98 @@ final class GamepadWire: ObservableObject {
     }
 
     func keyDown(_ code: Int32) {
+        guard code >= 0 else { return }
+        let uCode = UInt32(code)
         queue.async {
-            self.pending.append(PendingEvent(code: code, pressed: true, delayAfter: 0.035))
+            self.pending.append(PendingEvent(payload: .button(code: uCode, pressed: true), delayAfter: 0.025))
             self.wakeIfDisconnectedLocked()
             self.flushIfReady()
         }
     }
 
     func keyUp(_ code: Int32) {
+        guard code >= 0 else { return }
+        let uCode = UInt32(code)
         queue.async {
-            self.pending.append(PendingEvent(code: code, pressed: false, delayAfter: 0.015))
+            self.pending.append(PendingEvent(payload: .button(code: uCode, pressed: false), delayAfter: 0.015))
             self.wakeIfDisconnectedLocked()
             self.flushIfReady()
         }
     }
 
     func press(_ code: Int32) {
+        guard code >= 0 else { return }
+        let uCode = UInt32(code)
         queue.async {
-            self.pending.append(PendingEvent(code: code, pressed: true, delayAfter: 0.04))
-            self.pending.append(PendingEvent(code: code, pressed: false, delayAfter: 0.02))
+            self.pending.append(PendingEvent(payload: .button(code: uCode, pressed: true), delayAfter: 0.035))
+            self.pending.append(PendingEvent(payload: .button(code: uCode, pressed: false), delayAfter: 0.015))
             self.wakeIfDisconnectedLocked()
             self.flushIfReady()
         }
     }
 
     func longPress(_ code: Int32, duration: TimeInterval = 1.1) {
+        guard code >= 0 else { return }
+        let uCode = UInt32(code)
         queue.async {
-            self.pending.append(PendingEvent(code: code, pressed: true, delayAfter: max(0.6, duration)))
-            self.pending.append(PendingEvent(code: code, pressed: false, delayAfter: 0.02))
+            self.pending.append(PendingEvent(payload: .button(code: uCode, pressed: true), delayAfter: max(0.6, duration)))
+            self.pending.append(PendingEvent(payload: .button(code: uCode, pressed: false), delayAfter: 0.02))
             self.wakeIfDisconnectedLocked()
             self.flushIfReady()
         }
     }
 
-    @discardableResult
-    func type(_ text: String) -> [Character] {
-        var skipped: [Character] = []
-        var codes: [Int32] = []
-        for character in text {
-            if let code = KeyMap.code(for: character) { codes.append(code) }
-            else { skipped.append(character) }
-        }
+    /// Отправляет клавишу клавиатуры (`KeyboardSignal`, Linux input-event code: Backspace=14, Enter=28).
+    func sendKeyboardKey(_ keyCode: Int32) {
         queue.async {
-            for code in codes {
-                self.pending.append(PendingEvent(code: code, pressed: true, delayAfter: 0.025))
-                self.pending.append(PendingEvent(code: code, pressed: false, delayAfter: 0.025))
-            }
+            self.pending.append(PendingEvent(payload: .keyboardSignal(keyCode: keyCode, pressed: true), delayAfter: 0.03))
+            self.pending.append(PendingEvent(payload: .keyboardSignal(keyCode: keyCode, pressed: false), delayAfter: 0.02))
             self.wakeIfDisconnectedLocked()
             self.flushIfReady()
         }
-        return skipped
+    }
+
+    /// Отправляет произвольную UTF-8 строку (русский, английский, цифры, символы) через `KeyboardSymbols`.
+    func typeSymbols(_ text: String) {
+        guard !text.isEmpty else { return }
+        queue.async {
+            self.pending.append(PendingEvent(payload: .keyboardSymbols(text: text), delayAfter: 0.04))
+            self.wakeIfDisconnectedLocked()
+            self.flushIfReady()
+        }
+    }
+
+    func launchApp(packageName: String, signal: UInt32 = 1) {
+        guard !packageName.isEmpty else { return }
+        queue.async {
+            self.pending.append(PendingEvent(payload: .launchApp(signal: signal, packageName: packageName), delayAfter: 0.04))
+            self.wakeIfDisconnectedLocked()
+            self.flushIfReady()
+        }
+    }
+
+    /// Останавливает периодический Ping при уходе приложения в фон, сохраняя параметры сессии.
+    func pauseKeepalive() {
+        queue.async {
+            self.stopPingTimerLocked()
+            self.introRetryWorkItem?.cancel()
+            self.introRetryWorkItem = nil
+        }
+    }
+
+    /// Возобновляет Ping (и повторно отправляет Introduction при необходимости) после возврата из фона.
+    func resumeKeepalive() {
+        queue.async {
+            guard self.session != nil else { return }
+            if self.transportReady, self.connection != nil {
+                if let sid = self.session?.sessionId {
+                    self.sendIntroductionLocked(sessionId: sid, generation: self.generation)
+                }
+                self.startPingTimerLocked(generation: self.generation)
+            } else {
+                self.wakeIfDisconnectedLocked()
+            }
+        }
     }
 
     func stop() {
@@ -331,8 +378,17 @@ final class GamepadWire: ObservableObject {
         restartLocked(preservePending: true)
     }
 
+    private func stopPingTimerLocked() {
+        pingTimer?.setEventHandler {}
+        pingTimer?.cancel()
+        pingTimer = nil
+    }
+
     private func teardownLocked(preservePending: Bool) {
         generation += 1
+        stopPingTimerLocked()
+        introRetryWorkItem?.cancel()
+        introRetryWorkItem = nil
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         delayWorkItem?.cancel()
@@ -340,7 +396,9 @@ final class GamepadWire: ObservableObject {
         connection?.cancel()
         connection = nil
         transportReady = false
+        introAcked = false
         setReady(false)
+        setHandshakeConfirmed(false)
         sendInFlight = false
         if !preservePending {
             pending.removeAll()
@@ -379,6 +437,7 @@ final class GamepadWire: ObservableObject {
         hosts = Array(session.ipv4)
         hostIndex = 0
         order = 0
+        lastServerOrder = -1
         sentLogged = 0
         openNext()
     }
@@ -387,6 +446,12 @@ final class GamepadWire: ObservableObject {
         transportReady = value
         DispatchQueue.main.async {
             if self.ready != value { self.ready = value }
+        }
+    }
+
+    private func setHandshakeConfirmed(_ value: Bool) {
+        DispatchQueue.main.async {
+            if self.handshakeConfirmed != value { self.handshakeConfirmed = value }
         }
     }
 
@@ -431,8 +496,11 @@ final class GamepadWire: ObservableObject {
                     self.isProbing = false
                     DebugLog.add("✓ канал открыт \(host)")
                     self.setReady(true)
-                    self.finishOpen(true)
                     if let conn { self.receiveLoop(conn, generation: currentGeneration) }
+                    // Обязательное рукопожатие официального протокола: Introduction (field 21) + Ping (field 15) раз в 500 мс.
+                    self.sendIntroductionLocked(sessionId: session.sessionId, generation: currentGeneration)
+                    self.startPingTimerLocked(generation: currentGeneration)
+                    self.finishOpen(true)
                     self.flushIfReady()
                 case .failed(let error):
                     DebugLog.add("✖︎ \(host): \(error.localizedDescription)")
@@ -452,9 +520,13 @@ final class GamepadWire: ObservableObject {
     }
 
     private func advance() {
+        stopPingTimerLocked()
+        introRetryWorkItem?.cancel()
+        introRetryWorkItem = nil
         connection?.cancel()
         connection = nil
         setReady(false)
+        setHandshakeConfirmed(false)
         sendInFlight = false
         hostIndex += 1
         openNext()
@@ -462,11 +534,15 @@ final class GamepadWire: ObservableObject {
 
     private func handleDisconnectLocked(requeue item: PendingEvent? = nil, reason: String) {
         generation += 1
+        stopPingTimerLocked()
+        introRetryWorkItem?.cancel()
+        introRetryWorkItem = nil
         delayWorkItem?.cancel()
         delayWorkItem = nil
         connection?.cancel()
         connection = nil
         setReady(false)
+        setHandshakeConfirmed(false)
         sendInFlight = false
 
         if let item {
@@ -520,14 +596,115 @@ final class GamepadWire: ObservableObject {
         }
     }
 
+    // MARK: - Handshake (Introduction) & Keepalive (Ping 500ms)
+
+    private func sendIntroductionLocked(sessionId: String, generation expectedGen: Int) {
+        guard transportReady, expectedGen == generation else { return }
+        let msg = Self.encodeIntroduction(
+            sessionId: sessionId,
+            gamepadName: Self.clientName,
+            apiVersion: Self.gamepadApiVersion
+        )
+        sendImmediateDatagramLocked(protobuf: msg, label: "Introduction(v\(Self.gamepadApiVersion))", logAlways: true)
+
+        // Если UDP-пакет Introduction потерялся и ТВ не ответил за 400 мс — повторяем один раз.
+        introRetryWorkItem?.cancel()
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self,
+                  expectedGen == self.generation,
+                  self.transportReady,
+                  !self.introAcked,
+                  let sid = self.session?.sessionId else { return }
+            let retryMsg = Self.encodeIntroduction(
+                sessionId: sid,
+                gamepadName: Self.clientName,
+                apiVersion: Self.gamepadApiVersion
+            )
+            self.sendImmediateDatagramLocked(protobuf: retryMsg, label: "Introduction(повтор)", logAlways: true)
+        }
+        introRetryWorkItem = retry
+        queue.asyncAfter(deadline: .now() + 0.4, execute: retry)
+    }
+
+    private func startPingTimerLocked(generation expectedGen: Int) {
+        stopPingTimerLocked()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5, leeway: .milliseconds(50))
+        timer.setEventHandler { [weak self] in
+            guard let self,
+                  expectedGen == self.generation,
+                  self.transportReady,
+                  self.connection != nil else { return }
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1000.0)
+            let ping = Self.encodePing(timeMs: nowMs)
+            self.sendImmediateDatagramLocked(protobuf: ping, label: "Ping", logAlways: false)
+        }
+        pingTimer = timer
+        timer.resume()
+    }
+
+    private func buildPacketLocked(protobuf: Data) -> Data? {
+        guard let key else { return nil }
+        order &+= 1
+        let orderBytes = Data(Self.be32(order))
+
+        let plaintext: Data
+        switch cfg.framing {
+        case .rawEnc, .orderEnc, .lenOrderEnc:
+            plaintext = protobuf
+        case .encOrder, .lenEncOrder:
+            plaintext = orderBytes + protobuf
+        }
+
+        guard let encrypted = Self.encrypt(plaintext, key: key, cipher: cfg.cipher, ivMode: cfg.ivMode, staticIV: staticIV) else {
+            return nil
+        }
+
+        let payload: Data
+        switch cfg.framing {
+        case .rawEnc, .encOrder, .lenEncOrder:
+            payload = encrypted
+        case .orderEnc, .lenOrderEnc:
+            payload = orderBytes + encrypted
+        }
+
+        var packet = Data()
+        if cfg.framing.hasLength {
+            packet.append(contentsOf: Self.be32(UInt32(payload.count)))
+        }
+        packet.append(payload)
+        return packet
+    }
+
+    private func sendImmediateDatagramLocked(protobuf: Data, label: String, logAlways: Bool) {
+        guard transportReady, let connection else { return }
+        guard let packet = buildPacketLocked(protobuf: protobuf) else {
+            DebugLog.add("✖︎ ошибка шифрования \(label) (\(cfg.cipher.title))")
+            return
+        }
+        let currentGeneration = generation
+        connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+            guard let self else { return }
+            self.queue.async {
+                guard currentGeneration == self.generation else { return }
+                if let error {
+                    DebugLog.add("✖︎ \(label): \(error.localizedDescription)")
+                } else if logAlways {
+                    DebugLog.add("↑ \(label) (\(packet.count) Б, order=\(self.order))")
+                }
+            }
+        })
+    }
+
+    // MARK: - Receive & Decrypt TV Responses (`Message.Device`)
+
     private func receiveLoop(_ conn: NWConnection, generation: Int) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, complete, error in
             guard let self else { return }
             self.queue.async {
                 guard generation == self.generation, self.connection === conn else { return }
                 if let data, !data.isEmpty {
-                    let hex = data.prefix(24).map { String(format: "%02x", $0) }.joined()
-                    DebugLog.add("← ТВ ответил \(data.count) Б: \(hex)")
+                    self.handleIncomingDatagramLocked(data)
                 }
                 if let error {
                     DebugLog.add("← ошибка приёма: \(error.localizedDescription)")
@@ -544,48 +721,68 @@ final class GamepadWire: ObservableObject {
         }
     }
 
+    private func handleIncomingDatagramLocked(_ data: Data) {
+        if let key, let iv = staticIV, cfg.cipher == .cbc,
+           let plain = Self.aesCBCDecrypt(data, key: key, iv: iv),
+           plain.count >= 4 {
+            let tvOrder = Int32(bitPattern:
+                (UInt32(plain[0]) << 24) |
+                (UInt32(plain[1]) << 16) |
+                (UInt32(plain[2]) << 8) |
+                UInt32(plain[3])
+            )
+            if tvOrder > lastServerOrder {
+                lastServerOrder = tvOrder
+            }
+            let body = plain.subdata(in: 4..<plain.count)
+            let fieldNum = Self.firstProtobufFieldNumber(body)
+            // Поле 16 в Message.Device = Connection (подтверждение Introduction), поле 15 = Pong.
+            if fieldNum == 16 || !introAcked {
+                introAcked = true
+                introRetryWorkItem?.cancel()
+                introRetryWorkItem = nil
+                setHandshakeConfirmed(true)
+                DebugLog.add("✓ ТВ подтвердил канал пульта (field=\(fieldNum ?? 0), order=\(tvOrder), \(body.count) Б)")
+            }
+        } else {
+            let hex = data.prefix(16).map { String(format: "%02x", $0) }.joined()
+            DebugLog.add("← ТВ ответил \(data.count) Б: \(hex)")
+        }
+    }
+
+    private static func firstProtobufFieldNumber(_ data: Data) -> UInt64? {
+        guard !data.isEmpty else { return nil }
+        var tag: UInt64 = 0
+        var shift: UInt64 = 0
+        for byte in data {
+            tag |= UInt64(byte & 0x7f) << shift
+            if (byte & 0x80) == 0 {
+                return tag >> 3
+            }
+            shift += 7
+            if shift >= 64 { return nil }
+        }
+        return nil
+    }
+
+    // MARK: - Outbound Command Queue
+
     private func flushIfReady() {
         guard transportReady, !sendInFlight, !pending.isEmpty,
-              let connection, let key else { return }
+              let connection else { return }
 
         let item = pending.removeFirst()
-        let code = item.code
-        let pressed = item.pressed
-        let message = Self.encodeButton(code: code, pressed: pressed, mode: cfg.payloadMode)
+        let message = Self.encodePayload(item.payload, mode: cfg.payloadMode)
 
-        order &+= 1
-        let orderBytes = Data(Self.be32(order))
-
-        let plaintext: Data
-        switch cfg.framing {
-        case .rawEnc, .orderEnc, .lenOrderEnc:
-            plaintext = message
-        case .encOrder, .lenEncOrder:
-            plaintext = orderBytes + message
-        }
-
-        guard let encrypted = Self.encrypt(plaintext, key: key, cipher: cfg.cipher, ivMode: cfg.ivMode, staticIV: staticIV) else {
+        guard let packet = buildPacketLocked(protobuf: message) else {
             DebugLog.add("✖︎ ошибка шифрования (\(cfg.cipher.title))")
             pending.removeAll()
             return
         }
 
-        let payload: Data
-        switch cfg.framing {
-        case .rawEnc, .encOrder, .lenEncOrder:
-            payload = encrypted
-        case .orderEnc, .lenOrderEnc:
-            payload = orderBytes + encrypted
-        }
-
-        var packet = Data()
-        if cfg.framing.hasLength {
-            packet.append(contentsOf: Self.be32(UInt32(payload.count)))
-        }
-        packet.append(payload)
-
         sendInFlight = true
         let currentGeneration = generation
+        let label = item.payload.logLabel
         connection.send(content: packet, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
             self.queue.async {
@@ -595,9 +792,9 @@ final class GamepadWire: ObservableObject {
                     DebugLog.add("✖︎ отправка: \(error.localizedDescription)")
                     self.handleDisconnectLocked(requeue: item, reason: "ошибка отправки")
                 } else {
-                    if self.sentLogged < 4 {
+                    if self.sentLogged < 8 {
                         self.sentLogged += 1
-                        DebugLog.add("↑ отправлено \(packet.count) Б (код \(code) \(pressed ? "↓" : "↑"))")
+                        DebugLog.add("↑ отправлено \(packet.count) Б (\(label))")
                     }
                     if item.delayAfter > 0 {
                         self.delayWorkItem?.cancel()
@@ -618,29 +815,111 @@ final class GamepadWire: ObservableObject {
         })
     }
 
-    // MARK: - Protobuf helpers
+    // MARK: - Protobuf3 Encoders (`ru.sberdevices.gamepad.proto.Message.Gamepad`)
 
-    private static func encodeButton(code: Int32, pressed: Bool, mode: WireConfig.PayloadMode) -> Data {
-        switch mode {
-        case .protoBool:
-            return field(1, buttonMessage(code: code, stateByte: pressed ? 0x01 : 0x00))
-        case .protoAction:
-            return field(1, buttonMessage(code: code, stateByte: pressed ? 0x00 : 0x01))
-        case .protoFlat:
-            return buttonMessage(code: code, stateByte: pressed ? 0x01 : 0x00)
-        case .protoFlatAction:
-            return buttonMessage(code: code, stateByte: pressed ? 0x00 : 0x01)
+    private static func encodePayload(_ payload: OutboundPayload, mode: WireConfig.PayloadMode) -> Data {
+        switch payload {
+        case .introduction(let sessionId):
+            return encodeIntroduction(sessionId: sessionId, gamepadName: clientName, apiVersion: gamepadApiVersion)
+        case .button(let code, let pressed):
+            return encodeButton(code: code, pressed: pressed, mode: mode)
+        case .keyboardSignal(let keyCode, let pressed):
+            return encodeKeyboardSignal(keyCode: keyCode, pressed: pressed)
+        case .keyboardSymbols(let text):
+            return encodeKeyboardSymbols(text: text)
+        case .launchApp(let signal, let packageName):
+            return encodeLaunchApp(signal: signal, packageName: packageName)
         }
     }
 
-    private static func buttonMessage(code: Int32, stateByte: UInt8) -> Data {
+    /// `Message.Gamepad { button = 1 (code = 1 uint32, pressed = 2 bool) }` (proto3).
+    private static func encodeButton(code: UInt32, pressed: Bool, mode: WireConfig.PayloadMode) -> Data {
+        switch mode {
+        case .protoBool:
+            var inner = Data()
+            if code != 0 {
+                inner.append(0x08)
+                inner.append(contentsOf: varint(UInt64(code)))
+            }
+            if pressed {
+                inner.append(contentsOf: [0x10, 0x01])
+            }
+            return lengthDelimitedField(1, inner)
+        case .protoAction:
+            return lengthDelimitedField(1, legacyButton(code: code, stateByte: pressed ? 0x00 : 0x01))
+        case .protoFlat:
+            return legacyButton(code: code, stateByte: pressed ? 0x01 : 0x00)
+        case .protoFlatAction:
+            return legacyButton(code: code, stateByte: pressed ? 0x00 : 0x01)
+        }
+    }
+
+    private static func legacyButton(code: UInt32, stateByte: UInt8) -> Data {
         var data = Data([0x08])
-        data.append(contentsOf: varint(UInt64(UInt32(bitPattern: code))))
+        data.append(contentsOf: varint(UInt64(code)))
         data.append(contentsOf: [0x10, stateByte])
         return data
     }
 
-    private static func field(_ number: UInt64, _ bytes: Data) -> Data {
+    /// `Message.Gamepad { introduction = 21 { sessionId = 1, gamepadName = 2, apiVersion = 3 } }`.
+    private static func encodeIntroduction(sessionId: String, gamepadName: String, apiVersion: String) -> Data {
+        var inner = Data()
+        if !sessionId.isEmpty { inner.append(stringField(1, sessionId)) }
+        if !gamepadName.isEmpty { inner.append(stringField(2, gamepadName)) }
+        if !apiVersion.isEmpty { inner.append(stringField(3, apiVersion)) }
+        return lengthDelimitedField(21, inner)
+    }
+
+    /// `Message.Gamepad { ping = 15 { time = 1 uint64 } }`.
+    private static func encodePing(timeMs: UInt64) -> Data {
+        var inner = Data()
+        if timeMs != 0 {
+            inner.append(0x08)
+            inner.append(contentsOf: varint(timeMs))
+        }
+        return lengthDelimitedField(15, inner)
+    }
+
+    /// `Message.Gamepad { keyboardSignal = 5 { keyCode = 1 int32, pressed = 2 bool } }`.
+    private static func encodeKeyboardSignal(keyCode: Int32, pressed: Bool) -> Data {
+        var inner = Data()
+        if keyCode != 0 {
+            inner.append(0x08)
+            inner.append(contentsOf: varint(UInt64(bitPattern: Int64(keyCode))))
+        }
+        if pressed {
+            inner.append(contentsOf: [0x10, 0x01])
+        }
+        return lengthDelimitedField(5, inner)
+    }
+
+    /// `Message.Gamepad { keyboardSymbols = 8 { text = 1 string } }`.
+    private static func encodeKeyboardSymbols(text: String) -> Data {
+        var inner = Data()
+        if !text.isEmpty {
+            inner.append(stringField(1, text))
+        }
+        return lengthDelimitedField(8, inner)
+    }
+
+    /// `Message.Gamepad { launchApp = 17 { signal = 1 uint32, packageName = 2 string } }`.
+    private static func encodeLaunchApp(signal: UInt32, packageName: String) -> Data {
+        var inner = Data()
+        if signal != 0 {
+            inner.append(0x08)
+            inner.append(contentsOf: varint(UInt64(signal)))
+        }
+        if !packageName.isEmpty {
+            inner.append(stringField(2, packageName))
+        }
+        return lengthDelimitedField(17, inner)
+    }
+
+    private static func stringField(_ number: UInt64, _ value: String) -> Data {
+        lengthDelimitedField(number, Data(value.utf8))
+    }
+
+    private static func lengthDelimitedField(_ number: UInt64, _ bytes: Data) -> Data {
         var data = Data(varint((number << 3) | 2))
         data.append(contentsOf: varint(UInt64(bytes.count)))
         data.append(bytes)
@@ -782,11 +1061,11 @@ final class GamepadWire: ObservableObject {
         case .cbc:
             if ivMode == .prefixedRandom {
                 let iv = randomBytes(count: kCCBlockSizeAES128)
-                guard let enc = aesCBCEncrypt(data, key: key, iv: iv) else { return nil }
+                guard let enc = aesCBCCrypt(data, key: key, iv: iv, operation: CCOperation(kCCEncrypt)) else { return nil }
                 return iv + enc
             } else {
                 guard let iv = staticIV else { return nil }
-                return aesCBCEncrypt(data, key: key, iv: iv)
+                return aesCBCCrypt(data, key: key, iv: iv, operation: CCOperation(kCCEncrypt))
             }
 
         case .ecb:
@@ -794,7 +1073,11 @@ final class GamepadWire: ObservableObject {
         }
     }
 
-    private static func aesCBCEncrypt(_ data: Data, key: Data, iv: Data) -> Data? {
+    private static func aesCBCDecrypt(_ data: Data, key: Data, iv: Data) -> Data? {
+        aesCBCCrypt(data, key: key, iv: iv, operation: CCOperation(kCCDecrypt))
+    }
+
+    private static func aesCBCCrypt(_ data: Data, key: Data, iv: Data, operation: CCOperation) -> Data? {
         guard iv.count == kCCBlockSizeAES128 else { return nil }
         var output = Data(count: data.count + kCCBlockSizeAES128)
         var moved = 0
@@ -804,7 +1087,7 @@ final class GamepadWire: ObservableObject {
                 key.withUnsafeBytes { keyBytes in
                     iv.withUnsafeBytes { ivBytes in
                         CCCrypt(
-                            CCOperation(kCCEncrypt),
+                            operation,
                             CCAlgorithm(kCCAlgorithmAES),
                             CCOptions(kCCOptionPKCS7Padding),
                             keyBytes.baseAddress, key.count,

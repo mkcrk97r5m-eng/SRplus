@@ -868,7 +868,7 @@ struct TextInputSheet: View {
     var body: some View {
         VStack(spacing: 16) {
             Text("Ввод текста на ТВ").font(.headline).padding(.top, 20)
-            Text("Сначала выберите поле ввода на ТВ (кнопкой OK).")
+            Text("Сначала выберите поле ввода на ТВ (OK). Поддерживаются русский и английский.")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.5))
                 .multilineTextAlignment(.center)

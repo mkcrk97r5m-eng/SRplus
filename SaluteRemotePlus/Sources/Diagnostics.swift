@@ -39,11 +39,10 @@ final class WireProbe: ObservableObject {
                     continue
                 }
 
-                // Тестируем D-pad Вправо (22) и Влево (21): громкость на части ТВ идёт
-                // через SberCast setVolumeRequest, а не через gamepad-канал.
-                wire.press(22)
+                // Официальные коды Salute TV: Вправо = 23, Влево = 22.
+                wire.press(Int32(RemoteCommand.right.buttonCode))
                 try? await Task.sleep(nanoseconds: 750_000_000)
-                wire.press(21)
+                wire.press(Int32(RemoteCommand.left.buttonCode))
                 try? await Task.sleep(nanoseconds: 1_100_000_000)
             }
 
@@ -86,7 +85,7 @@ struct DiagnosticsSheet: View {
                             row("Версия сервиса", session.serviceVersion.isEmpty ? "—" : session.serviceVersion)
                             row("Ключ", GamepadWire.describeKey(session.aesKey))
                         }
-                        row("Канал", wire.ready ? "открыт" : "закрыт")
+                        row("Канал", wire.ready ? (wire.handshakeConfirmed ? "открыт (ТВ ответил)" : "открыт (ожидание ТВ)") : "закрыт")
                         row("Вариант", wire.config.title)
                     }
 
@@ -112,8 +111,8 @@ struct DiagnosticsSheet: View {
                             .buttonStyle(.borderedProminent)
 
                             HStack {
-                                Button("Вправо →") { wire.press(22) }.buttonStyle(.bordered)
-                                Button("← Влево") { wire.press(21) }.buttonStyle(.bordered)
+                                Button("Вправо →") { wire.press(Int32(RemoteCommand.right.buttonCode)) }.buttonStyle(.bordered)
+                                Button("← Влево") { wire.press(Int32(RemoteCommand.left.buttonCode)) }.buttonStyle(.bordered)
                                 Button("Переоткрыть") { wire.prepare(session: session) }.buttonStyle(.bordered)
                             }
                             .font(.footnote)
@@ -178,17 +177,19 @@ struct DiagnosticsSheet: View {
             Text("Команды отправляются через текущую конфигурацию канала. Проверяй реакцию телевизора после каждого нажатия.")
                 .font(.caption2).foregroundStyle(.white.opacity(0.45))
             HStack {
-                testButton("↑", code: 19)
-                testButton("←", code: 21)
-                testButton("OK", code: 23)
-                testButton("→", code: 22)
-                testButton("↓", code: 20)
+                testButton("↑", code: Int32(RemoteCommand.up.buttonCode))
+                testButton("←", code: Int32(RemoteCommand.left.buttonCode))
+                testButton("OK", code: Int32(RemoteCommand.ok.buttonCode))
+                testButton("→", code: Int32(RemoteCommand.right.buttonCode))
+                testButton("↓", code: Int32(RemoteCommand.down.buttonCode))
             }
             HStack {
-                testButton("Назад", code: 4)
-                testButton("Домой", code: 3)
-                testButton("Настр.", code: 176)
-                Button("Пит. 1.2с") { wire.longPress(26, duration: 1.2) }
+                testButton("Назад", code: Int32(RemoteCommand.back.buttonCode))
+                testButton("Домой", code: Int32(RemoteCommand.home.buttonCode))
+                Button("Настр.") { remote.send(.settings) }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+                Button("Пит. 1.2с") { wire.longPress(Int32(RemoteCommand.power.buttonCode), duration: 1.2) }
                     .buttonStyle(.bordered)
                     .font(.caption)
             }
