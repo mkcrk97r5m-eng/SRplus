@@ -127,6 +127,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
     private var reconnectRetryCount = 0
     private var wireReconnectCount = 0
     private var restartTask: Task<Void, Never>?
+    private var noticeClearTask: Task<Void, Never>?
     private var discoveryRestarts = 0
 
     private let savedDeviceIDKey = "SaluteRemotePlus.savedDeviceID"
@@ -194,6 +195,20 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         activeDeviceFromList?.isConnected == true
     }
 
+    private func showNotice(_ text: String?, autoClear: Bool = true) {
+        noticeClearTask?.cancel()
+        noticeClearTask = nil
+        notice = text
+        guard autoClear, let text, !text.isEmpty else { return }
+        noticeClearTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if self?.notice == text { self?.notice = nil }
+            }
+        }
+    }
+
     // MARK: - Кнопки, текст, голос
     func send(_ command: RemoteCommand) {
         DebugLog.add("ДЕЙСТВИЕ: кнопка \(command) (код \(command.keyCode))")
@@ -208,7 +223,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                 lastKnownVolume = next
                 let req = cast.sendRequest(deviceId: id, request: LibSberCast.CastRequest(type: .setVolumeRequest(volumePercentValue: next)))
                 DebugLog.add("ЗАПРОС → setVolume(\(next)%), id=\(String(describing: req))")
-                notice = "Громкость: \(next)%"
+                showNotice("Громкость: \(next)%")
                 return
             case .volumeDown:
                 let current = connectedDevice?.metadata?.volume.percent ?? lastKnownVolume
@@ -216,7 +231,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                 lastKnownVolume = next
                 let req = cast.sendRequest(deviceId: id, request: LibSberCast.CastRequest(type: .setVolumeRequest(volumePercentValue: next)))
                 DebugLog.add("ЗАПРОС → setVolume(\(next)%), id=\(String(describing: req))")
-                notice = "Громкость: \(next)%"
+                showNotice("Громкость: \(next)%")
                 return
             case .mute:
                 let muted = connectedDevice?.metadata?.volume.muted ?? lastKnownMuted
@@ -225,7 +240,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                 let cmd: LibSberCast.CastRequestType.MediaCommandType = nextMuted ? .mute : .unmute
                 let req = cast.sendRequest(deviceId: id, request: LibSberCast.CastRequest(type: .mediaCommandRequest(command: cmd)))
                 DebugLog.add("ЗАПРОС → mediaCommand(\(cmd)), id=\(String(describing: req))")
-                notice = nextMuted ? "Звук выключен" : "Звук включён"
+                showNotice(nextMuted ? "Звук выключен" : "Звук включён")
                 return
             case .playPause:
                 let playing = currentMediaPlaying ?? lastKnownPlaying
@@ -234,7 +249,7 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
                 let cmd: LibSberCast.CastRequestType.MediaCommandType = nextPlaying ? .play : .pause
                 let req = cast.sendRequest(deviceId: id, request: LibSberCast.CastRequest(type: .mediaCommandRequest(command: cmd)))
                 DebugLog.add("ЗАПРОС → mediaCommand(\(cmd)), id=\(String(describing: req))")
-                notice = nil
+                showNotice(nextPlaying ? "Воспроизведение" : "Пауза")
                 return
             default:
                 break
@@ -242,12 +257,39 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
         }
 
         guard session != nil else {
-            notice = "Канал пульта ещё не готов — переподключаем…"
+            showNotice("Канал пульта ещё не готов — переподключаем…", autoClear: false)
             if !gamepadRequestInFlight && !deviceConnectInFlight { reconnectChannel() }
             return
         }
-        notice = nil
+        showNotice(nil)
         wire.press(Int32(command.keyCode))
+    }
+
+    func sendDown(_ command: RemoteCommand) {
+        DebugLog.add("ДЕЙСТВИЕ: зажатие \(command) (код \(command.keyCode) ↓)")
+        guard session != nil else {
+            showNotice("Канал пульта ещё не готов — переподключаем…", autoClear: false)
+            if !gamepadRequestInFlight && !deviceConnectInFlight { reconnectChannel() }
+            return
+        }
+        showNotice(nil)
+        wire.keyDown(Int32(command.keyCode))
+    }
+
+    func sendUp(_ command: RemoteCommand) {
+        DebugLog.add("ДЕЙСТВИЕ: отпускание \(command) (код \(command.keyCode) ↑)")
+        guard session != nil else { return }
+        wire.keyUp(Int32(command.keyCode))
+    }
+
+    func sendLongPress(_ command: RemoteCommand, duration: TimeInterval = 1.2) {
+        DebugLog.add("ДЕЙСТВИЕ: долгое нажатие \(command) (код \(command.keyCode))")
+        guard session != nil else {
+            showNotice("Канал пульта ещё не готов — переподключаем…", autoClear: false)
+            if !gamepadRequestInFlight && !deviceConnectInFlight { reconnectChannel() }
+            return
+        }
+        wire.longPress(Int32(command.keyCode), duration: duration)
     }
 
     private var currentMediaPlaying: Bool? {
@@ -262,12 +304,12 @@ final class SberCastRemote: NSObject, ObservableObject, LibSberCast.SberCastList
 
     func findRemote() {
         guard let id = activeDeviceID, isActiveDeviceConnected else {
-            notice = "Телевизор не подключён"
+            showNotice("Телевизор не подключён")
             return
         }
         let req = cast.sendRequest(deviceId: id, request: LibSberCast.CastRequest(type: .findRemoteControllerRequest))
         DebugLog.add("ЗАПРОС → findRemoteController, id=\(String(describing: req))")
-        notice = "Отправлен сигнал поиска пульта"
+        showNotice("Отправлен сигнал поиска пульта")
     }
 
     func sendKey(_ code: Int32) {
